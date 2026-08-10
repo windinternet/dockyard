@@ -20,15 +20,6 @@ export class ProjectService {
     if (candidates.some((candidate) => candidate === null)) throw new BadRequestException('应用候选包含无效命令或策略。');
     const root = resolve(body.path);
     if ((candidates as ImportPreviewApplication[]).some((candidate) => outside(root, candidate.cwd))) throw new BadRequestException('应用工作目录必须位于导入项目内。');
-    const project = this.database.db.listProjects().find((item) => item.path === root);
-    if (project) {
-      const desired = new Map<string, Set<string>>();
-      for (const candidate of candidates as ImportPreviewApplication[]) { const names = desired.get(candidate.cwd) ?? new Set<string>(); names.add(candidate.name); desired.set(candidate.cwd, names); }
-      const stale = this.database.db.listApplications(project.id).filter((application) => desired.has(application.cwd) && !desired.get(application.cwd)!.has(application.name));
-      const running = stale.filter((application) => this.runtime.application(application.id).status === 'running');
-      if (running.length) throw new BadRequestException(`请先停止过时的应用记录后再重新导入：${running.map((application) => application.name).join('、')}。`);
-      this.database.db.removeApplications(stale.map((application) => application.id));
-    }
     return this.database.db.importProject(root, body.name, candidates as ImportPreviewApplication[]);
   }
   list() { return this.database.db.listProjects(); }

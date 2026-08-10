@@ -3,7 +3,7 @@ import { homedir, platform } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { defaultDockyardSettings, defaultProjectSettings, restartPolicyForPreset, type Application, type ApplicationCommand, type ApplicationCommandOption, type ApplicationStatus, type DockyardSettings, type ImportPreviewApplication, type LifecycleEvent, type LogPolicy, type MetricRollup, type Project, type ProjectSettings, type RestartPolicy } from '@dockyard/core';
+import { defaultDockyardSettings, defaultProjectSettings, parseProjectSettings, restartPolicyForPreset, type Application, type ApplicationCommand, type ApplicationCommandOption, type ApplicationStatus, type DockyardSettings, type ImportPreviewApplication, type LifecycleEvent, type LogPolicy, type MetricRollup, type Project, type ProjectSettings, type RestartPolicy } from '@dockyard/core';
 
 export class PathResolver {
   constructor(private readonly stateDirectory = defaultStateDirectory()) {}
@@ -68,24 +68,8 @@ export class DockyardDatabase {
   updateApplicationPolicies(id: string, restartPolicy: RestartPolicy, logPolicy: LogPolicy): Application { const result = this.db.prepare('UPDATE applications SET restart_policy_json = ?, log_policy_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(restartPolicy), JSON.stringify(logPolicy), new Date().toISOString(), id); if (result.changes !== 1) throw new Error('应用不存在。'); return this.getApplication(id)!; }
   updateApplicationCommand(id: string, selectedCommand: string): Application { const application = this.getApplication(id); if (!application) throw new Error('应用不存在。'); const option = application.commandOptions.find((item) => item.name === selectedCommand); if (!option) throw new Error('所选命令不属于该应用。'); this.db.prepare('UPDATE applications SET command_json = ?, selected_command = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(option.command), selectedCommand, new Date().toISOString(), id); return this.getApplication(id)!; }
   updateProjectSettings(id: string, settings: ProjectSettings): Project {
-    const now = new Date().toISOString(); this.db.exec('BEGIN IMMEDIATE;');
-    try { const result = this.db.prepare('UPDATE projects SET settings_json = ? WHERE id = ?').run(JSON.stringify(settings), id); if (result.changes !== 1) throw new Error('项目不存在。'); this.db.prepare('UPDATE applications SET restart_policy_json = ?, log_policy_json = ?, updated_at = ? WHERE project_id = ?').run(JSON.stringify(settings.restartPolicy), JSON.stringify(settings.logPolicy), now, id); this.db.exec('COMMIT;'); } catch (error) { this.db.exec('ROLLBACK;'); throw error; }
+    const result = this.db.prepare('UPDATE projects SET settings_json = ? WHERE id = ?').run(JSON.stringify(settings), id); if (result.changes !== 1) throw new Error('项目不存在。');
     return this.listProjects().find((project) => project.id === id)!;
-  }
-  removeApplications(ids: readonly string[]): void {
-    if (!ids.length) return;
-    const placeholders = ids.map(() => '?').join(', '); this.db.exec('BEGIN IMMEDIATE;');
-    try {
-      const projects = this.listProjects();
-      this.db.prepare(`DELETE FROM metric_rollups WHERE application_id IN (${placeholders})`).run(...ids);
-      this.db.prepare(`DELETE FROM lifecycle_events WHERE application_id IN (${placeholders})`).run(...ids);
-      this.db.prepare(`DELETE FROM applications WHERE id IN (${placeholders})`).run(...ids);
-      for (const project of projects) {
-        const remainingIds = project.settings.startupApplicationIds.filter((id) => !ids.includes(id));
-        if (remainingIds.length !== project.settings.startupApplicationIds.length) this.db.prepare('UPDATE projects SET settings_json = ? WHERE id = ?').run(JSON.stringify({ ...project.settings, startupApplicationIds: remainingIds }), project.id);
-      }
-      this.db.exec('COMMIT;');
-    } catch (error) { this.db.exec('ROLLBACK;'); throw error; }
   }
   deleteProject(id: string): void { this.db.exec('BEGIN IMMEDIATE;'); try { this.db.prepare('DELETE FROM metric_rollups WHERE application_id IN (SELECT id FROM applications WHERE project_id = ?)').run(id); this.db.prepare('DELETE FROM lifecycle_events WHERE application_id IN (SELECT id FROM applications WHERE project_id = ?)').run(id); this.db.prepare('DELETE FROM applications WHERE project_id = ?').run(id); const result = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id); if (result.changes !== 1) throw new Error('项目不存在。'); this.db.exec('COMMIT;'); } catch (error) { this.db.exec('ROLLBACK;'); throw error; } }
   importProject(path: string, name: string, candidates: readonly ImportPreviewApplication[]): { project: Project; applications: Application[] } {
@@ -121,7 +105,7 @@ export class DockyardDatabase {
 function rowToProject(row: Record<string, unknown>): Project { const parsed = parseProjectSettingsJson(row.settingsJson); return { id: String(row.id), path: String(row.path), name: String(row.name), settings: parsed, createdAt: String(row.createdAt) }; }
 function rowToApplication(row: Record<string, unknown>): Application { const command = JSON.parse(String(row.commandJson)) as ApplicationCommand; const commandOptions = parseCommandOptionsJson(row.commandOptionsJson, command); const selectedCommand = typeof row.selectedCommand === 'string' && commandOptions.some((option) => option.name === row.selectedCommand) ? row.selectedCommand : commandOptions[0]!.name; return { id: String(row.id), projectId: String(row.projectId), name: String(row.name), cwd: String(row.cwd), command, commandOptions, selectedCommand, status: 'stopped', pid: null, restartPolicy: JSON.parse(String(row.restartPolicyJson)) as RestartPolicy, logPolicy: JSON.parse(String(row.logPolicyJson)) as LogPolicy, createdAt: String(row.createdAt), updatedAt: String(row.updatedAt) }; }
 function parseCommandOptionsJson(value: unknown, command: ApplicationCommand): ApplicationCommandOption[] { try { const options = JSON.parse(String(value)) as ApplicationCommandOption[]; return Array.isArray(options) && options.length && options.every((option) => typeof option?.name === 'string' && option.command && typeof option.command.executable === 'string' && Array.isArray(option.command.args)) ? options : [{ name: command.args.at(-1) ?? 'default', command }]; } catch { return [{ name: command.args.at(-1) ?? 'default', command }]; } }
-function parseProjectSettingsJson(value: unknown): ProjectSettings { try { const settings = JSON.parse(String(value)) as Partial<ProjectSettings>; if (Array.isArray(settings.startupApplicationIds) && settings.restartPolicy && settings.logPolicy) return settings as ProjectSettings; } catch {} return { startupApplicationIds: [], restartPolicy: { ...defaultProjectSettings.restartPolicy }, logPolicy: { ...defaultProjectSettings.logPolicy } }; }
+function parseProjectSettingsJson(value: unknown): ProjectSettings { try { const settings = parseProjectSettings(JSON.parse(String(value))); if (settings) return settings; } catch {} return { startupApplicationIds: [], restartPolicy: { ...defaultProjectSettings.restartPolicy }, logPolicy: { ...defaultProjectSettings.logPolicy } }; }
 function defaultStateDirectory(): string { const base = process.env.XDG_STATE_HOME || (platform() === 'darwin' ? join(homedir(), 'Library', 'Application Support') : join(homedir(), '.local', 'state')); return join(base, 'dockyard'); }
 function safeArray(value: unknown): string[] { try { const parsed: unknown = JSON.parse(String(value)); return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string') ? parsed : []; } catch { return []; } }
 function numberOrNull(value: unknown): number | null { return typeof value === 'number' ? value : null; }

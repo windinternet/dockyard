@@ -1,0 +1,9 @@
+{
+  "name": "service",
+  "private": true,
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "watch:types": "tsc --watch"
+  }
+}

@@ -9,6 +9,7 @@ import { normalizeSelection } from '../apps/api/dist/native-directory-picker.ser
 import { DatabaseSync } from 'node:sqlite';
 
 const fixture = resolve('tests/fixtures/scannable');
+const monorepoFixture = resolve('tests/fixtures/monorepo');
 
 test('scanner reads runnable package scripts and static PM2 literals without executing them', async () => {
   const preview = await scanProject(fixture, true);
@@ -22,6 +23,13 @@ test('scanner reads runnable package scripts and static PM2 literals without exe
   assert.equal(packageModule?.name, 'scannable-fixture');
   assert.equal(packageModule?.selectedCommand, 'dev');
   assert.deepEqual(packageModule?.commandOptions.map((option) => option.name), ['dev', 'start']);
+});
+
+test('scanner imports each runnable workspace module once and excludes workspace orchestration scripts', async () => {
+  const preview = await scanProject(monorepoFixture, false);
+  assert.deepEqual(preview.applications.map((application) => application.name), ['service']);
+  assert.deepEqual(preview.applications[0]?.commandOptions.map((option) => option.name), ['dev', 'start']);
+  assert.equal(preview.applications[0]?.selectedCommand, 'dev');
 });
 
 test('database import remains idempotent by project path and application name', async () => {
@@ -39,7 +47,8 @@ test('database import remains idempotent by project path and application name', 
   assert.deepEqual(application?.commandOptions.map((option) => option.name), ['dev', 'start']);
   const project = database.updateProjectSettings(first.project.id, { startupApplicationIds: [application.id], restartPolicy: { mode: 'always', maxRetries: 2, retryDelayMs: 1_000, stableWindowMs: 30_000 }, logPolicy: { maxFiles: 3, maxBytesPerFile: 1_024, retentionDays: 7 } });
   assert.deepEqual(project.settings.startupApplicationIds, [application.id]);
-  assert.equal(database.getApplication(application.id)?.restartPolicy.mode, 'always');
+  assert.equal(project.settings.restartPolicy.mode, 'always');
+  assert.equal(database.getApplication(application.id)?.restartPolicy.mode, 'on-failure');
   const changed = database.updateApplicationCommand(application.id, 'start');
   assert.equal(changed.selectedCommand, 'start');
   assert.deepEqual(changed.command.args, ['run', 'start']);

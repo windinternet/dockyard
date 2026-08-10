@@ -1,0 +1,8 @@
+{
+  "name": "workspace-root",
+  "private": true,
+  "scripts": {
+    "dev": "turbo dev",
+    "watch:types": "tsc --watch"
+  }
+}

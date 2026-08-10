@@ -118,8 +118,8 @@ export function restartPolicyForPreset(preset: RestartPreset): RestartPolicy {
   return { ...defaultRestartPolicy };
 }
 
-const runnableScript = /(^|:)(dev|start|serve|watch)(:|$)/i;
-const excludedDirectories = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage']);
+const runnableScript = /^(dev|start|serve)$/i;
+const excludedDirectories = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', 'test', 'tests', 'fixtures', 'examples']);
 
 interface PackageManifest { name?: unknown; scripts?: unknown; workspaces?: unknown; }
 
@@ -127,6 +127,7 @@ interface PackageManifest { name?: unknown; scripts?: unknown; workspaces?: unkn
 export async function scanProject(rootInput: string, includePm2 = true): Promise<ImportPreview> {
   const root = resolve(rootInput);
   await assertDirectory(root);
+  const hasPnpmWorkspace = await pathExists(join(root, 'pnpm-workspace.yaml'));
   const manifests = await discoverPackageManifests(root, 3);
   const applications: ImportPreviewApplication[] = [];
   const warnings: Pm2ConversionWarning[] = [];
@@ -134,6 +135,7 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
     const manifest = await readJson<PackageManifest>(manifestPath);
     const scripts = isRecord(manifest.scripts) ? manifest.scripts : {};
     const cwd = resolve(manifestPath, '..');
+    if (cwd === root && (manifest.workspaces !== undefined || hasPnpmWorkspace)) continue;
     const commandOptions = Object.entries(scripts)
       .filter(([script, value]) => typeof value === 'string' && runnableScript.test(script))
       .map(([name]) => ({ name, command: { executable: packageManagerFor(cwd), args: ['run', name] } }));
@@ -271,6 +273,7 @@ function deduplicateCandidates(candidates: readonly ImportPreviewApplication[]):
 function manifestName(manifest: PackageManifest, cwd: string): string { return typeof manifest.name === 'string' && manifest.name ? manifest.name : basename(cwd); }
 function packageManagerFor(cwd: string): string { return cwd.includes('node_modules') ? 'npm' : 'pnpm'; }
 async function readJson<T>(path: string): Promise<T> { return JSON.parse(await readFile(path, 'utf8')) as T; }
+async function pathExists(path: string): Promise<boolean> { try { await access(path, constants.R_OK); return true; } catch { return false; } }
 async function assertDirectory(path: string): Promise<void> { if (!isAbsolute(path)) throw new Error('项目路径必须是绝对路径。'); const info = await stat(path); if (!info.isDirectory()) throw new Error('项目路径必须是目录。'); await access(path, constants.R_OK); }
 function quoteArgument(value: string): string { return /[\s"']/u.test(value) ? JSON.stringify(value) : value; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
