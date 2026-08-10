@@ -157,6 +157,18 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
   return { root, projectName: basename(root), applications: deduplicateCandidates(applications), warnings };
 }
 
+/** Discovers direct child code repositories without treating a parent folder as a Project itself. */
+export async function scanProjectDirectory(rootInput: string, includePm2 = true): Promise<ImportPreview[]> {
+  const root = resolve(rootInput);
+  await assertDirectory(root);
+  const entries = await readdir(root, { withFileTypes: true });
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && !excludedDirectories.has(entry.name))
+    .map((entry) => join(root, entry.name));
+  const projects = await Promise.all(candidates.map(async (candidate) => await isProjectDirectory(candidate) ? scanProject(candidate, includePm2) : null));
+  return projects.filter((project): project is ImportPreview => project !== null).sort((left, right) => left.projectName.localeCompare(right.projectName));
+}
+
 export function commandDisplay(command: ApplicationCommand): string {
   return [command.executable, ...command.args].map(quoteArgument).join(' ');
 }
@@ -274,6 +286,11 @@ function manifestName(manifest: PackageManifest, cwd: string): string { return t
 function packageManagerFor(cwd: string): string { return cwd.includes('node_modules') ? 'npm' : 'pnpm'; }
 async function readJson<T>(path: string): Promise<T> { return JSON.parse(await readFile(path, 'utf8')) as T; }
 async function pathExists(path: string): Promise<boolean> { try { await access(path, constants.R_OK); return true; } catch { return false; } }
+async function isProjectDirectory(path: string): Promise<boolean> {
+  if (await pathExists(join(path, 'package.json')) || await pathExists(join(path, 'pnpm-workspace.yaml')) || await pathExists(join(path, '.git'))) return true;
+  const pm2Files = await Promise.all(['ecosystem.config.js', 'ecosystem.config.cjs', 'ecosystem.config.mjs', 'ecosystem.json'].map((name) => pathExists(join(path, name))));
+  return pm2Files.some(Boolean);
+}
 async function assertDirectory(path: string): Promise<void> { if (!isAbsolute(path)) throw new Error('项目路径必须是绝对路径。'); const info = await stat(path); if (!info.isDirectory()) throw new Error('项目路径必须是目录。'); await access(path, constants.R_OK); }
 function quoteArgument(value: string): string { return /[\s"']/u.test(value) ? JSON.stringify(value) : value; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }

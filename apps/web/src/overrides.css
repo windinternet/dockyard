@@ -86,6 +86,73 @@
   white-space: nowrap;
 }
 
+.scan-candidate-table {
+  height: 360px;
+  border: 1px solid var(--semi-color-border);
+  border-radius: 8px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.scan-candidate-table .app-table {
+  min-width: 620px;
+}
+
+.scan-candidate-table .app-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-top: 12px;
+  background: var(--semi-color-bg-1);
+  box-shadow: 0 1px var(--semi-color-border);
+}
+
+.scan-candidate-table .app-table th:first-child,
+.scan-candidate-table .app-table td:first-child {
+  width: 62px;
+  padding-left: 12px;
+}
+
+.scan-candidate-table .app-table td:nth-child(2) {
+  width: 58%;
+}
+
+.scan-candidate-table .semi-tag {
+  margin-right: 7px;
+}
+
+.scan-candidate-table .semi-typography {
+  display: block;
+  margin-top: 4px;
+}
+
+.scan-project-table {
+  height: 390px;
+  border: 1px solid var(--semi-color-border);
+  border-radius: 8px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.scan-project-table .app-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-top: 12px;
+  background: var(--semi-color-bg-1);
+  box-shadow: 0 1px var(--semi-color-border);
+}
+
+.scan-project-table .app-table th:first-child,
+.scan-project-table .app-table td:first-child {
+  width: 62px;
+  padding-left: 12px;
+}
+
+.scan-project-table .app-table td:nth-child(2) {
+  width: 48%;
+}
+
 .command-picker,
 .startup-rule {
   display: inline-flex;

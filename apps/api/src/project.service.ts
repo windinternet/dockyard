@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { relative, resolve } from 'node:path';
-import { parseApplicationCommand, parseCommandOptions, parseLogPolicy, parseProjectSettings, parseRestartPolicy, scanProject, type ImportPreviewApplication, type ProjectSettings } from '@dockyard/core';
+import { parseApplicationCommand, parseCommandOptions, parseLogPolicy, parseProjectSettings, parseRestartPolicy, scanProject, scanProjectDirectory, type ImportPreview, type ImportPreviewApplication, type ProjectSettings } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
 import { RuntimeService } from './runtime.service.js';
 
@@ -12,15 +12,18 @@ export class ProjectService {
     if (!body || typeof body.path !== 'string') throw new BadRequestException('path 必须是绝对目录路径。');
     if (body.includePm2 !== undefined && typeof body.includePm2 !== 'boolean') throw new BadRequestException('includePm2 必须是布尔值。');
     try {
-      const preview = await scanProject(body.path, body.includePm2 !== false); const project = this.database.db.listProjects().find((item) => item.path === preview.root);
-      const staleApplications = project ? staleApplicationsFor(this.database.db.listApplications(project.id), preview.applications).map((application) => ({ id: application.id, name: application.name, cwd: application.cwd })) : [];
-      return {
-        project: { path: preview.root, name: preview.projectName },
-        applications: preview.applications,
-        warnings: preview.warnings,
-        staleApplications
-      };
+      return this.preview(await scanProject(body.path, body.includePm2 !== false));
     } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法扫描项目。'); }
+  }
+  async scanDirectory(input: unknown) {
+    const body = record(input);
+    if (!body || typeof body.path !== 'string') throw new BadRequestException('path 必须是绝对目录路径。');
+    if (body.includePm2 !== undefined && typeof body.includePm2 !== 'boolean') throw new BadRequestException('includePm2 必须是布尔值。');
+    try {
+      const root = resolve(body.path);
+      const projects = await scanProjectDirectory(root, body.includePm2 !== false);
+      return { root, projects: projects.map((project) => this.preview(project)) };
+    } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法扫描项目目录。'); }
   }
   import(input: unknown) {
     const body = record(input);
@@ -38,6 +41,16 @@ export class ProjectService {
     }
     return this.database.db.importProject(root, body.name, candidates as ImportPreviewApplication[]);
   }
+  importMany(input: unknown) {
+    const body = record(input);
+    if (!body || typeof body.root !== 'string' || !Array.isArray(body.projects)) throw new BadRequestException('批量导入请求无效。');
+    const root = resolve(body.root);
+    return { projects: body.projects.map((project) => {
+      const candidate = record(project);
+      if (!candidate || typeof candidate.path !== 'string' || !directChild(root, candidate.path)) throw new BadRequestException('批量导入项目必须是所选目录的直接子目录。');
+      return this.import(candidate);
+    }) };
+  }
   list() { return this.database.db.listProjects(); }
   async start(id: string) { return { applications: await this.runtime.startProject(id) }; }
   async stop(id: string) { return { applications: await this.runtime.stopProject(id) }; }
@@ -50,6 +63,11 @@ export class ProjectService {
     return this.runtime.updateProjectSettings(id, settings as ProjectSettings);
   }
   async remove(id: string) { await this.runtime.deleteProject(id); return { deleted: true }; }
+  private preview(preview: ImportPreview) {
+    const project = this.database.db.listProjects().find((item) => item.path === preview.root);
+    const staleApplications = project ? staleApplicationsFor(this.database.db.listApplications(project.id), preview.applications).map((application) => ({ id: application.id, name: application.name, cwd: application.cwd })) : [];
+    return { project: { path: preview.root, name: preview.projectName }, applications: preview.applications, warnings: preview.warnings, staleApplications };
+  }
 }
 function parseCandidate(value: unknown): ImportPreviewApplication | null {
   const body = record(value);
@@ -60,4 +78,5 @@ function parseCandidate(value: unknown): ImportPreviewApplication | null {
 }
 function record(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function outside(root: string, candidate: string): boolean { const path = relative(root, resolve(candidate)); return path === '..' || path.startsWith(`..${'/'}`) || path.startsWith(`..${'\\'}`); }
+function directChild(root: string, candidate: string): boolean { const path = relative(root, resolve(candidate)); return Boolean(path) && !outside(root, candidate) && !path.includes('/') && !path.includes('\\'); }
 function staleApplicationsFor(existing: ReturnType<DatabaseService['db']['listApplications']>, candidates: readonly ImportPreviewApplication[]) { const desired = new Map<string, Set<string>>(); for (const candidate of candidates) { const names = desired.get(candidate.cwd) ?? new Set<string>(); names.add(candidate.name); desired.set(candidate.cwd, names); } return existing.filter((application) => desired.has(application.cwd) && !desired.get(application.cwd)!.has(application.name)); }
