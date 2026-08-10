@@ -22,6 +22,7 @@ export interface LogPolicy {
 export type RestartPreset = 'balanced' | 'resilient' | 'manual';
 export interface DockyardSettings {
   version: number;
+  sampleIntervalMs: number;
   retentionDays: number;
   maxFiles: number;
   maxBytesPerFile: number;
@@ -110,7 +111,7 @@ export interface ImportPreview {
 export const defaultRestartPolicy: RestartPolicy = Object.freeze({ mode: 'on-failure', maxRetries: 5, retryDelayMs: 1_000, stableWindowMs: 30_000 });
 export const defaultLogPolicy: LogPolicy = Object.freeze({ maxFiles: 5, maxBytesPerFile: 10 * 1024 * 1024, retentionDays: 14 });
 export const defaultProjectSettings: ProjectSettings = Object.freeze({ startupApplicationIds: [], restartPolicy: defaultRestartPolicy, logPolicy: defaultLogPolicy });
-export const defaultDockyardSettings: DockyardSettings = Object.freeze({ version: 0, retentionDays: 14, maxFiles: 5, maxBytesPerFile: 10 * 1024 * 1024, restartPreset: 'balanced' });
+export const defaultDockyardSettings: DockyardSettings = Object.freeze({ version: 0, sampleIntervalMs: 1_000, retentionDays: 14, maxFiles: 5, maxBytesPerFile: 10 * 1024 * 1024, restartPreset: 'balanced' });
 
 export function restartPolicyForPreset(preset: RestartPreset): RestartPolicy {
   if (preset === 'manual') return { mode: 'never', maxRetries: 0, retryDelayMs: 1_000, stableWindowMs: 30_000 };

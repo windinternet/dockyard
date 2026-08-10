@@ -9,7 +9,7 @@
 1. Project 启动/停止/重启会按其 Application 集合请求守护进程操作；CLI 支持 `dockyard start <project>` 和 `dockyard start <project>:<module>`。
 2. Project 删除需要明确确认，先安全停止托管模块，再删除 SQLite 元数据；日志文件保留在本机，绝不删除未确认的目录或源码。
 3. Application 的重启和日志策略可由受类型校验的 API 更新，并即时刷新活动运行时。
-4. 运行中的 Application 每 5 秒采样 PID、CPU 百分比、RSS、运行时长与重启数，并写入聚合元数据；报表只展示实际采样值。
+4. 运行中的 Application 默认每 1 秒采样 PID、CPU 百分比、RSS、运行时长与重启数；该频率可在本机设置中调整并即时生效，报表只展示实际采样值。
 5. 侧栏导航不溢出其固定宽度，窄屏仍可用。
 6. 每个可运行 package 模块只导入一个 Application；它保存可选启动命令并优先使用 `dev`。项目页将模块直接嵌入所属项目，并由项目设置管理一键启动集合、守护与日志规则。
 

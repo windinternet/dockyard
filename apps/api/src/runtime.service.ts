@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, OnModuleDestroy, RequestTimeoutException } from '@nestjs/common';
+import { Injectable, NotFoundException, OnApplicationBootstrap, OnModuleDestroy, RequestTimeoutException } from '@nestjs/common';
 import { appendFileSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -13,12 +13,13 @@ interface Runtime { child: ChildProcess; application: Application; status: Appli
 export interface LogMessage { applicationId: string; stream: LogStream; at: string; line: string; }
 
 @Injectable()
-export class RuntimeService implements OnModuleDestroy {
+export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly runtimes = new Map<string, Runtime>();
   private readonly terminalStatuses = new Map<string, ApplicationStatus>();
   private readonly logs = new EventEmitter();
-  private readonly sampler: ReturnType<typeof setInterval>;
-  constructor(private readonly database: DatabaseService) { this.sampler = setInterval(() => this.sample(), 5_000); this.sampler.unref(); }
+  private sampler: ReturnType<typeof setInterval>;
+  constructor(private readonly database: DatabaseService) { this.sampler = this.createSampler(1_000); }
+  onApplicationBootstrap(): void { this.setSampleInterval(this.database.db.settings().sampleIntervalMs); }
   onModuleDestroy(): void { clearInterval(this.sampler); for (const id of this.runtimes.keys()) void this.stop(id); }
   applications(): Application[] { return this.database.db.listApplications().map((application) => this.withStatus(application)); }
   application(id: string): Application { const application = this.database.db.getApplication(id); if (!application) throw new NotFoundException('应用不存在。'); return this.withStatus(application); }
@@ -34,6 +35,7 @@ export class RuntimeService implements OnModuleDestroy {
   updatePolicies(id: string, restartPolicy: Application['restartPolicy'], logPolicy: Application['logPolicy']): Application { const application = this.database.db.updateApplicationPolicies(id, restartPolicy, logPolicy); const runtime = this.runtimes.get(id); if (runtime) runtime.application = application; return this.withStatus(application); }
   updateCommand(id: string, selectedCommand: string): Application { if (this.runtimes.has(id)) throw new RequestTimeoutException('运行中的应用不能切换启动命令；请先停止它。'); return this.withStatus(this.database.db.updateApplicationCommand(id, selectedCommand)); }
   updateProjectSettings(projectId: string, settings: ProjectSettings) { const project = this.database.db.updateProjectSettings(projectId, settings); this.reloadRunningPolicies(); return project; }
+  setSampleInterval(intervalMs: number): void { clearInterval(this.sampler); this.sampler = this.createSampler(intervalMs); this.sample(); }
   async stop(id: string): Promise<Application> { const runtime = this.runtimes.get(id); this.terminalStatuses.set(id, 'stopped'); if (!runtime) return this.application(id); runtime.manuallyStopped = true; runtime.status = 'stopped'; const exited = new Promise<void>((done) => runtime.child.once('exit', () => done())); runtime.child.kill('SIGTERM'); try { await Promise.race([exited, new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new RequestTimeoutException('应用未在 5 秒内优雅退出。它仍在运行，未执行强制终止；请检查日志和进程状态。')), 5_000); timer.unref(); })]); } catch (error) { runtime.status = 'running'; this.terminalStatuses.set(id, 'running'); throw error; } this.database.db.recordEvent({ applicationId: id, type: 'stopped', detail: { signal: 'SIGTERM' } }); return this.application(id); }
   reloadRunningPolicies(): void { for (const [id, runtime] of this.runtimes) { const current = this.database.db.getApplication(id); if (current) runtime.application = current; } }
   onLog(listener: (message: LogMessage) => void): () => void { this.logs.on('line', listener); return () => this.logs.off('line', listener); }
@@ -60,6 +62,7 @@ export class RuntimeService implements OnModuleDestroy {
   private withStatus(application: Application): Application { const runtime = this.runtimes.get(application.id); return { ...application, status: runtime?.status ?? this.terminalStatuses.get(application.id) ?? 'stopped', pid: runtime?.child.pid ?? null }; }
   private project(id: string) { const project = this.database.db.listProjects().find((item) => item.id === id); if (!project) throw new NotFoundException('项目不存在。'); return project; }
   private sample(): void { for (const [applicationId, runtime] of this.runtimes) void this.sampleRuntime(applicationId, runtime); }
+  private createSampler(intervalMs: number): ReturnType<typeof setInterval> { const sampler = setInterval(() => this.sample(), intervalMs); sampler.unref(); return sampler; }
   private async sampleRuntime(applicationId: string, runtime: Runtime): Promise<void> { const process = await inspectProcess(runtime.child.pid); this.database.db.recordMetric({ applicationId, sampledAt: new Date().toISOString(), pid: runtime.child.pid ?? null, cpuPercent: process?.cpuPercent ?? null, uptimeMs: Date.now() - runtime.startedAt, restartCount: runtime.retries, rssBytes: process?.rssBytes ?? null }); }
 }
 async function inspectProcess(pid: number | undefined): Promise<{ cpuPercent: number | null; rssBytes: number | null } | null> { if (!pid || platform() === 'win32') return null; try { const { stdout } = await promisify(execFile)('ps', ['-o', 'rss=,pcpu=', '-p', String(pid)], { timeout: 1_000 }); const [rss, cpu] = stdout.trim().split(/\s+/u).map(Number); return Number.isFinite(rss) && Number.isFinite(cpu) ? { rssBytes: rss * 1024, cpuPercent: cpu } : null; } catch { return null; } }

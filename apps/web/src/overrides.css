@@ -3,6 +3,15 @@
   min-width: 244px !important;
   max-width: 244px !important;
   overflow: hidden;
+  border-right: 0 !important;
+}
+
+.app-main {
+  border-left: 1px solid var(--semi-color-border);
+}
+
+.settings-nav {
+  border-top: 0 !important;
 }
 
 .app-sider .semi-navigation,
@@ -76,6 +85,10 @@
   display: block;
 }
 
+.metric-trend b {
+  animation: metric-value-pop .36s ease-out;
+}
+
 .metric-trend small,
 .metric-unavailable {
   color: var(--semi-color-text-2);
@@ -90,6 +103,7 @@
 
 .trend-area {
   fill: color-mix(in srgb, var(--semi-color-primary) 18%, transparent);
+  animation: trend-fill .7s ease-out;
 }
 
 .trend-line {
@@ -113,6 +127,43 @@
 @keyframes trend-draw {
   from { stroke-dashoffset: 160; opacity: .35; }
   to { stroke-dashoffset: 0; opacity: 1; }
+}
+
+@keyframes trend-fill {
+  from { opacity: .15; transform: scaleY(.18); transform-origin: bottom; }
+  to { opacity: 1; transform: scaleY(1); transform-origin: bottom; }
+}
+
+@keyframes metric-value-pop {
+  from { opacity: .35; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.command-tag {
+  cursor: pointer;
+}
+
+.command-popover {
+  display: grid;
+  min-width: 210px;
+  gap: 4px;
+  padding: 4px;
+}
+
+.command-popover > b {
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.command-popover .semi-button {
+  justify-content: space-between;
+  gap: 14px;
+  text-align: left;
+}
+
+.command-popover code {
+  color: var(--semi-color-text-2);
+  font-size: 11px;
 }
 
 .scan-project-candidate {

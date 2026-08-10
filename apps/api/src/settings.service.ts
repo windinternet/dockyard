@@ -13,13 +13,14 @@ export class SettingsService {
     const input = parseSettings(value);
     const settings = this.database.db.applySettings(input);
     this.runtime.reloadRunningPolicies();
+    this.runtime.setSampleInterval(settings.sampleIntervalMs);
     return { ...settings, stateDirectory: this.get().stateDirectory };
   }
 }
 
 function parseSettings(value: unknown): SettingsInput {
-  if (!isRecord(value) || !isPositiveInteger(value.retentionDays) || !isPositiveInteger(value.maxFiles) || !isPositiveInteger(value.maxBytesPerFile) || !['balanced', 'resilient', 'manual'].includes(String(value.restartPreset))) throw new BadRequestException('设置值无效。保留期、文件数和单文件限制必须为正整数。');
-  return { retentionDays: value.retentionDays, maxFiles: value.maxFiles, maxBytesPerFile: value.maxBytesPerFile, restartPreset: value.restartPreset as RestartPreset };
+  if (!isRecord(value) || !isPositiveInteger(value.sampleIntervalMs) || value.sampleIntervalMs < 1_000 || value.sampleIntervalMs > 60_000 || !isPositiveInteger(value.retentionDays) || !isPositiveInteger(value.maxFiles) || !isPositiveInteger(value.maxBytesPerFile) || !['balanced', 'resilient', 'manual'].includes(String(value.restartPreset))) throw new BadRequestException('设置值无效。采样间隔必须在 1 至 60 秒之间。');
+  return { sampleIntervalMs: value.sampleIntervalMs, retentionDays: value.retentionDays, maxFiles: value.maxFiles, maxBytesPerFile: value.maxBytesPerFile, restartPreset: value.restartPreset as RestartPreset };
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null; }
 function isPositiveInteger(value: unknown): value is number { return typeof value === 'number' && Number.isInteger(value) && value > 0; }
