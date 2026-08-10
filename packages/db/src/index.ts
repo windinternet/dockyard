@@ -3,7 +3,7 @@ import { homedir, platform } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { defaultDockyardSettings, restartPolicyForPreset, type Application, type ApplicationCommand, type ApplicationStatus, type DockyardSettings, type ImportPreviewApplication, type LifecycleEvent, type LogPolicy, type MetricRollup, type Project, type RestartPolicy } from '@dockyard/core';
+import { defaultDockyardSettings, defaultProjectSettings, restartPolicyForPreset, type Application, type ApplicationCommand, type ApplicationCommandOption, type ApplicationStatus, type DockyardSettings, type ImportPreviewApplication, type LifecycleEvent, type LogPolicy, type MetricRollup, type Project, type ProjectSettings, type RestartPolicy } from '@dockyard/core';
 
 export class PathResolver {
   constructor(private readonly stateDirectory = defaultStateDirectory()) {}
@@ -20,14 +20,17 @@ export class DockyardDatabase {
   get pathResolver(): PathResolver { return this.paths; }
   migrate(): void {
     this.db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, cwd TEXT NOT NULL, command_json TEXT NOT NULL, restart_policy_json TEXT NOT NULL, log_policy_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_id, name));
+      CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, settings_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, cwd TEXT NOT NULL, command_json TEXT NOT NULL, command_options_json TEXT NOT NULL DEFAULT '[]', selected_command TEXT NOT NULL DEFAULT '', restart_policy_json TEXT NOT NULL, log_policy_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_id, name));
       CREATE TABLE IF NOT EXISTS lifecycle_events (id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id), type TEXT NOT NULL, occurred_at TEXT NOT NULL, detail_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS metric_rollups (application_id TEXT NOT NULL REFERENCES applications(id), sampled_at TEXT NOT NULL, pid INTEGER, cpu_percent REAL, uptime_ms INTEGER NOT NULL, restart_count INTEGER NOT NULL, rss_bytes INTEGER, PRIMARY KEY(application_id, sampled_at));
       CREATE TABLE IF NOT EXISTS settings_versions (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, config_json TEXT NOT NULL);
       INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, datetime('now'));`);
     this.ensureColumn('metric_rollups', 'pid', 'INTEGER');
     this.ensureColumn('metric_rollups', 'cpu_percent', 'REAL');
+    this.ensureColumn('projects', 'settings_json', "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn('applications', 'command_options_json', "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('applications', 'selected_command', "TEXT NOT NULL DEFAULT ''");
   }
   /** Migrates the pre-MVP prototype schema without requiring users to delete local state. */
   private upgradeLegacySchema(): void {
@@ -59,21 +62,48 @@ export class DockyardDatabase {
   }
   private tableExists(name: string): boolean { return Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name)); }
   private ensureColumn(table: string, column: string, declaration: string): void { const columns = this.db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all() as Array<{ name: string }>; if (!columns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`); }
-  listProjects(): Project[] { return (this.db.prepare('SELECT id, path, name, created_at AS createdAt FROM projects ORDER BY name').all() as unknown as Project[]); }
-  listApplications(projectId?: string): Application[] { const sql = `SELECT a.id, a.project_id AS projectId, a.name, a.cwd, a.command_json AS commandJson, a.restart_policy_json AS restartPolicyJson, a.log_policy_json AS logPolicyJson, a.created_at AS createdAt, a.updated_at AS updatedAt FROM applications a ${projectId ? 'WHERE a.project_id = ?' : ''} ORDER BY a.name`; return (projectId ? this.db.prepare(sql).all(projectId) : this.db.prepare(sql).all()).map(rowToApplication); }
-  getApplication(id: string): Application | null { const row = this.db.prepare('SELECT id, project_id AS projectId, name, cwd, command_json AS commandJson, restart_policy_json AS restartPolicyJson, log_policy_json AS logPolicyJson, created_at AS createdAt, updated_at AS updatedAt FROM applications WHERE id = ?').get(id); return row ? rowToApplication(row) : null; }
+  listProjects(): Project[] { return (this.db.prepare('SELECT id, path, name, settings_json AS settingsJson, created_at AS createdAt FROM projects ORDER BY name').all() as Record<string, unknown>[]).map(rowToProject); }
+  listApplications(projectId?: string): Application[] { const sql = `SELECT a.id, a.project_id AS projectId, a.name, a.cwd, a.command_json AS commandJson, a.command_options_json AS commandOptionsJson, a.selected_command AS selectedCommand, a.restart_policy_json AS restartPolicyJson, a.log_policy_json AS logPolicyJson, a.created_at AS createdAt, a.updated_at AS updatedAt FROM applications a ${projectId ? 'WHERE a.project_id = ?' : ''} ORDER BY a.name`; return (projectId ? this.db.prepare(sql).all(projectId) : this.db.prepare(sql).all()).map(rowToApplication); }
+  getApplication(id: string): Application | null { const row = this.db.prepare('SELECT id, project_id AS projectId, name, cwd, command_json AS commandJson, command_options_json AS commandOptionsJson, selected_command AS selectedCommand, restart_policy_json AS restartPolicyJson, log_policy_json AS logPolicyJson, created_at AS createdAt, updated_at AS updatedAt FROM applications WHERE id = ?').get(id); return row ? rowToApplication(row as Record<string, unknown>) : null; }
   updateApplicationPolicies(id: string, restartPolicy: RestartPolicy, logPolicy: LogPolicy): Application { const result = this.db.prepare('UPDATE applications SET restart_policy_json = ?, log_policy_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(restartPolicy), JSON.stringify(logPolicy), new Date().toISOString(), id); if (result.changes !== 1) throw new Error('应用不存在。'); return this.getApplication(id)!; }
+  updateApplicationCommand(id: string, selectedCommand: string): Application { const application = this.getApplication(id); if (!application) throw new Error('应用不存在。'); const option = application.commandOptions.find((item) => item.name === selectedCommand); if (!option) throw new Error('所选命令不属于该应用。'); this.db.prepare('UPDATE applications SET command_json = ?, selected_command = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(option.command), selectedCommand, new Date().toISOString(), id); return this.getApplication(id)!; }
+  updateProjectSettings(id: string, settings: ProjectSettings): Project {
+    const now = new Date().toISOString(); this.db.exec('BEGIN IMMEDIATE;');
+    try { const result = this.db.prepare('UPDATE projects SET settings_json = ? WHERE id = ?').run(JSON.stringify(settings), id); if (result.changes !== 1) throw new Error('项目不存在。'); this.db.prepare('UPDATE applications SET restart_policy_json = ?, log_policy_json = ?, updated_at = ? WHERE project_id = ?').run(JSON.stringify(settings.restartPolicy), JSON.stringify(settings.logPolicy), now, id); this.db.exec('COMMIT;'); } catch (error) { this.db.exec('ROLLBACK;'); throw error; }
+    return this.listProjects().find((project) => project.id === id)!;
+  }
+  removeApplications(ids: readonly string[]): void {
+    if (!ids.length) return;
+    const placeholders = ids.map(() => '?').join(', '); this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      const projects = this.listProjects();
+      this.db.prepare(`DELETE FROM metric_rollups WHERE application_id IN (${placeholders})`).run(...ids);
+      this.db.prepare(`DELETE FROM lifecycle_events WHERE application_id IN (${placeholders})`).run(...ids);
+      this.db.prepare(`DELETE FROM applications WHERE id IN (${placeholders})`).run(...ids);
+      for (const project of projects) {
+        const remainingIds = project.settings.startupApplicationIds.filter((id) => !ids.includes(id));
+        if (remainingIds.length !== project.settings.startupApplicationIds.length) this.db.prepare('UPDATE projects SET settings_json = ? WHERE id = ?').run(JSON.stringify({ ...project.settings, startupApplicationIds: remainingIds }), project.id);
+      }
+      this.db.exec('COMMIT;');
+    } catch (error) { this.db.exec('ROLLBACK;'); throw error; }
+  }
   deleteProject(id: string): void { this.db.exec('BEGIN IMMEDIATE;'); try { this.db.prepare('DELETE FROM metric_rollups WHERE application_id IN (SELECT id FROM applications WHERE project_id = ?)').run(id); this.db.prepare('DELETE FROM lifecycle_events WHERE application_id IN (SELECT id FROM applications WHERE project_id = ?)').run(id); this.db.prepare('DELETE FROM applications WHERE project_id = ?').run(id); const result = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id); if (result.changes !== 1) throw new Error('项目不存在。'); this.db.exec('COMMIT;'); } catch (error) { this.db.exec('ROLLBACK;'); throw error; } }
   importProject(path: string, name: string, candidates: readonly ImportPreviewApplication[]): { project: Project; applications: Application[] } {
-    const now = new Date().toISOString(); const existing = this.db.prepare('SELECT id, path, name, created_at AS createdAt FROM projects WHERE path = ?').get(resolve(path)) as Project | undefined;
-    const project = existing ?? { id: randomUUID(), path: resolve(path), name, createdAt: now };
-    if (!existing) this.db.prepare('INSERT INTO projects(id, path, name, created_at) VALUES (?, ?, ?, ?)').run(project.id, project.path, project.name, project.createdAt);
-    const upsert = this.db.prepare(`INSERT INTO applications(id, project_id, name, cwd, command_json, restart_policy_json, log_policy_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, name) DO UPDATE SET cwd = excluded.cwd, command_json = excluded.command_json, updated_at = excluded.updated_at`);
-    const settings = this.settings(); const restartPolicy = restartPolicyForPreset(settings.restartPreset); const logPolicy = { maxFiles: settings.maxFiles, maxBytesPerFile: settings.maxBytesPerFile, retentionDays: settings.retentionDays };
+    const now = new Date().toISOString(); const existing = (this.db.prepare('SELECT id, path, name, settings_json AS settingsJson, created_at AS createdAt FROM projects WHERE path = ?').get(resolve(path)) as Record<string, unknown> | undefined); const existingProject = existing ? rowToProject(existing) : undefined;
+    const settings = this.settings(); const projectSettings: ProjectSettings = existingProject?.settings ?? { startupApplicationIds: [], restartPolicy: restartPolicyForPreset(settings.restartPreset), logPolicy: { maxFiles: settings.maxFiles, maxBytesPerFile: settings.maxBytesPerFile, retentionDays: settings.retentionDays } };
+    const project = existingProject ?? { id: randomUUID(), path: resolve(path), name, settings: projectSettings, createdAt: now };
+    if (!existingProject) this.db.prepare('INSERT INTO projects(id, path, name, settings_json, created_at) VALUES (?, ?, ?, ?, ?)').run(project.id, project.path, project.name, JSON.stringify(project.settings), project.createdAt);
+    const existingApplication = this.db.prepare('SELECT id, selected_command AS selectedCommand FROM applications WHERE project_id = ? AND name = ?');
+    const insertApplication = this.db.prepare('INSERT INTO applications(id, project_id, name, cwd, command_json, command_options_json, selected_command, restart_policy_json, log_policy_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    const updateApplication = this.db.prepare('UPDATE applications SET cwd = ?, command_json = ?, command_options_json = ?, selected_command = ?, updated_at = ? WHERE id = ?');
     for (const candidate of candidates) {
-      const candidateRestartPolicy = candidate.origin === 'pm2-ecosystem' ? candidate.restartPolicy : restartPolicy;
-      const candidateLogPolicy = candidate.origin === 'pm2-ecosystem' ? candidate.logPolicy : logPolicy;
-      upsert.run(randomUUID(), project.id, candidate.name, candidate.cwd, JSON.stringify(candidate.command), JSON.stringify(candidateRestartPolicy), JSON.stringify(candidateLogPolicy), now, now);
+      const candidateRestartPolicy = candidate.origin === 'pm2-ecosystem' ? candidate.restartPolicy : projectSettings.restartPolicy;
+      const candidateLogPolicy = candidate.origin === 'pm2-ecosystem' ? candidate.logPolicy : projectSettings.logPolicy;
+      const current = existingApplication.get(project.id, candidate.name) as { id: string; selectedCommand: string } | undefined;
+      const selectedCommand = current && candidate.commandOptions.some((option) => option.name === current.selectedCommand) ? current.selectedCommand : candidate.selectedCommand;
+      const selectedOption = candidate.commandOptions.find((option) => option.name === selectedCommand)!;
+      if (current) updateApplication.run(candidate.cwd, JSON.stringify(selectedOption.command), JSON.stringify(candidate.commandOptions), selectedCommand, now, current.id);
+      else insertApplication.run(randomUUID(), project.id, candidate.name, candidate.cwd, JSON.stringify(selectedOption.command), JSON.stringify(candidate.commandOptions), selectedCommand, JSON.stringify(candidateRestartPolicy), JSON.stringify(candidateLogPolicy), now, now);
     }
     return { project, applications: this.listApplications(project.id) };
   }
@@ -88,7 +118,10 @@ export class DockyardDatabase {
     try { this.db.prepare('INSERT INTO settings_versions(version, applied_at, config_json) VALUES (?, ?, ?)').run(next.version, new Date().toISOString(), JSON.stringify(input)); const update = this.db.prepare('UPDATE applications SET log_policy_json = ?, restart_policy_json = ?, updated_at = ?'); update.run(JSON.stringify(logPolicy), JSON.stringify(restartPolicy), new Date().toISOString()); this.db.exec('COMMIT;'); return next; } catch (error) { this.db.exec('ROLLBACK;'); throw error; }
   }
 }
-function rowToApplication(row: Record<string, unknown>): Application { return { id: String(row.id), projectId: String(row.projectId), name: String(row.name), cwd: String(row.cwd), command: JSON.parse(String(row.commandJson)) as ApplicationCommand, status: 'stopped', pid: null, restartPolicy: JSON.parse(String(row.restartPolicyJson)) as RestartPolicy, logPolicy: JSON.parse(String(row.logPolicyJson)) as LogPolicy, createdAt: String(row.createdAt), updatedAt: String(row.updatedAt) }; }
+function rowToProject(row: Record<string, unknown>): Project { const parsed = parseProjectSettingsJson(row.settingsJson); return { id: String(row.id), path: String(row.path), name: String(row.name), settings: parsed, createdAt: String(row.createdAt) }; }
+function rowToApplication(row: Record<string, unknown>): Application { const command = JSON.parse(String(row.commandJson)) as ApplicationCommand; const commandOptions = parseCommandOptionsJson(row.commandOptionsJson, command); const selectedCommand = typeof row.selectedCommand === 'string' && commandOptions.some((option) => option.name === row.selectedCommand) ? row.selectedCommand : commandOptions[0]!.name; return { id: String(row.id), projectId: String(row.projectId), name: String(row.name), cwd: String(row.cwd), command, commandOptions, selectedCommand, status: 'stopped', pid: null, restartPolicy: JSON.parse(String(row.restartPolicyJson)) as RestartPolicy, logPolicy: JSON.parse(String(row.logPolicyJson)) as LogPolicy, createdAt: String(row.createdAt), updatedAt: String(row.updatedAt) }; }
+function parseCommandOptionsJson(value: unknown, command: ApplicationCommand): ApplicationCommandOption[] { try { const options = JSON.parse(String(value)) as ApplicationCommandOption[]; return Array.isArray(options) && options.length && options.every((option) => typeof option?.name === 'string' && option.command && typeof option.command.executable === 'string' && Array.isArray(option.command.args)) ? options : [{ name: command.args.at(-1) ?? 'default', command }]; } catch { return [{ name: command.args.at(-1) ?? 'default', command }]; } }
+function parseProjectSettingsJson(value: unknown): ProjectSettings { try { const settings = JSON.parse(String(value)) as Partial<ProjectSettings>; if (Array.isArray(settings.startupApplicationIds) && settings.restartPolicy && settings.logPolicy) return settings as ProjectSettings; } catch {} return { startupApplicationIds: [], restartPolicy: { ...defaultProjectSettings.restartPolicy }, logPolicy: { ...defaultProjectSettings.logPolicy } }; }
 function defaultStateDirectory(): string { const base = process.env.XDG_STATE_HOME || (platform() === 'darwin' ? join(homedir(), 'Library', 'Application Support') : join(homedir(), '.local', 'state')); return join(base, 'dockyard'); }
 function safeArray(value: unknown): string[] { try { const parsed: unknown = JSON.parse(String(value)); return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string') ? parsed : []; } catch { return []; } }
 function numberOrNull(value: unknown): number | null { return typeof value === 'number' ? value : null; }

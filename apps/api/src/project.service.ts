@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { relative, resolve } from 'node:path';
-import { parseApplicationCommand, parseLogPolicy, parseRestartPolicy, scanProject, type ImportPreviewApplication } from '@dockyard/core';
+import { parseApplicationCommand, parseCommandOptions, parseLogPolicy, parseProjectSettings, parseRestartPolicy, scanProject, type ImportPreviewApplication, type ProjectSettings } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
 import { RuntimeService } from './runtime.service.js';
 
@@ -20,20 +20,36 @@ export class ProjectService {
     if (candidates.some((candidate) => candidate === null)) throw new BadRequestException('应用候选包含无效命令或策略。');
     const root = resolve(body.path);
     if ((candidates as ImportPreviewApplication[]).some((candidate) => outside(root, candidate.cwd))) throw new BadRequestException('应用工作目录必须位于导入项目内。');
+    const project = this.database.db.listProjects().find((item) => item.path === root);
+    if (project) {
+      const desired = new Map<string, Set<string>>();
+      for (const candidate of candidates as ImportPreviewApplication[]) { const names = desired.get(candidate.cwd) ?? new Set<string>(); names.add(candidate.name); desired.set(candidate.cwd, names); }
+      const stale = this.database.db.listApplications(project.id).filter((application) => desired.has(application.cwd) && !desired.get(application.cwd)!.has(application.name));
+      const running = stale.filter((application) => this.runtime.application(application.id).status === 'running');
+      if (running.length) throw new BadRequestException(`请先停止过时的应用记录后再重新导入：${running.map((application) => application.name).join('、')}。`);
+      this.database.db.removeApplications(stale.map((application) => application.id));
+    }
     return this.database.db.importProject(root, body.name, candidates as ImportPreviewApplication[]);
   }
   list() { return this.database.db.listProjects(); }
   async start(id: string) { return { applications: await this.runtime.startProject(id) }; }
   async stop(id: string) { return { applications: await this.runtime.stopProject(id) }; }
   async restart(id: string) { return { applications: await this.runtime.restartProject(id) }; }
+  settings(id: string, input: unknown) {
+    const body = record(input); const settings = parseProjectSettings(body);
+    if (!settings) throw new BadRequestException('项目启动、守护或日志设置无效。');
+    const applications = this.database.db.listApplications(id); const ids = new Set(applications.map((application) => application.id));
+    if (settings.startupApplicationIds.some((applicationId) => !ids.has(applicationId))) throw new BadRequestException('一键启动规则只能引用本项目应用。');
+    return this.runtime.updateProjectSettings(id, settings as ProjectSettings);
+  }
   async remove(id: string) { await this.runtime.deleteProject(id); return { deleted: true }; }
 }
 function parseCandidate(value: unknown): ImportPreviewApplication | null {
   const body = record(value);
   if (!body || (body.origin !== 'package-script' && body.origin !== 'pm2-ecosystem') || typeof body.key !== 'string' || typeof body.name !== 'string' || typeof body.cwd !== 'string') return null;
-  const command = parseApplicationCommand(body.command); const restartPolicy = parseRestartPolicy(body.restartPolicy); const logPolicy = parseLogPolicy(body.logPolicy);
-  if (!command || !restartPolicy || !logPolicy) return null;
-  return { key: body.key, origin: body.origin, name: body.name, cwd: body.cwd, command, restartPolicy, logPolicy, warnings: [] };
+  const command = parseApplicationCommand(body.command); const commandOptions = parseCommandOptions(body.commandOptions); const selectedCommand = typeof body.selectedCommand === 'string' ? body.selectedCommand : null; const restartPolicy = parseRestartPolicy(body.restartPolicy); const logPolicy = parseLogPolicy(body.logPolicy);
+  if (!command || !commandOptions || !selectedCommand || !commandOptions.some((option) => option.name === selectedCommand) || !restartPolicy || !logPolicy) return null;
+  return { key: body.key, origin: body.origin, name: body.name, cwd: body.cwd, command, commandOptions, selectedCommand, restartPolicy, logPolicy, warnings: [] };
 }
 function record(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function outside(root: string, candidate: string): boolean { const path = relative(root, resolve(candidate)); return path === '..' || path.startsWith(`..${'/'}`) || path.startsWith(`..${'\\'}`); }

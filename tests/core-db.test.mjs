@@ -15,9 +15,13 @@ test('scanner reads runnable package scripts and static PM2 literals without exe
   assert.equal(preview.applications.length, 2);
   assert.deepEqual(preview.applications.map((application) => application.origin).sort(), ['package-script', 'pm2-ecosystem']);
   const pm2 = preview.applications.find((application) => application.origin === 'pm2-ecosystem');
+  const packageModule = preview.applications.find((application) => application.origin === 'package-script');
   assert.equal(pm2?.command.executable, process.execPath);
   assert.equal(pm2?.restartPolicy.mode, 'never');
   assert.match(pm2?.warnings[0]?.reason ?? '', /不受 MVP 支持/);
+  assert.equal(packageModule?.name, 'scannable-fixture');
+  assert.equal(packageModule?.selectedCommand, 'dev');
+  assert.deepEqual(packageModule?.commandOptions.map((option) => option.name), ['dev', 'start']);
 });
 
 test('database import remains idempotent by project path and application name', async () => {
@@ -29,6 +33,16 @@ test('database import remains idempotent by project path and application name', 
   assert.equal(database.listProjects().length, 1);
   assert.equal(first.project.id, second.project.id);
   assert.equal(database.listApplications(first.project.id).length, 1);
+  const application = database.listApplications(first.project.id)[0];
+  assert.ok(application);
+  assert.equal(application?.selectedCommand, 'dev');
+  assert.deepEqual(application?.commandOptions.map((option) => option.name), ['dev', 'start']);
+  const project = database.updateProjectSettings(first.project.id, { startupApplicationIds: [application.id], restartPolicy: { mode: 'always', maxRetries: 2, retryDelayMs: 1_000, stableWindowMs: 30_000 }, logPolicy: { maxFiles: 3, maxBytesPerFile: 1_024, retentionDays: 7 } });
+  assert.deepEqual(project.settings.startupApplicationIds, [application.id]);
+  assert.equal(database.getApplication(application.id)?.restartPolicy.mode, 'always');
+  const changed = database.updateApplicationCommand(application.id, 'start');
+  assert.equal(changed.selectedCommand, 'start');
+  assert.deepEqual(changed.command.args, ['run', 'start']);
   database.close();
 });
 

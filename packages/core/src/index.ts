@@ -33,10 +33,23 @@ export interface ApplicationCommand {
   args: readonly string[];
 }
 
+export interface ApplicationCommandOption {
+  name: string;
+  command: ApplicationCommand;
+}
+
+export interface ProjectSettings {
+  /** Empty means every application in the project participates in one-click start. */
+  startupApplicationIds: readonly string[];
+  restartPolicy: RestartPolicy;
+  logPolicy: LogPolicy;
+}
+
 export interface Project {
   id: string;
   path: string;
   name: string;
+  settings: ProjectSettings;
   createdAt: string;
 }
 
@@ -46,6 +59,8 @@ export interface Application {
   name: string;
   cwd: string;
   command: ApplicationCommand;
+  commandOptions: readonly ApplicationCommandOption[];
+  selectedCommand: string;
   status: ApplicationStatus;
   pid: number | null;
   restartPolicy: RestartPolicy;
@@ -79,6 +94,8 @@ export interface ImportPreviewApplication {
   name: string;
   cwd: string;
   command: ApplicationCommand;
+  commandOptions: readonly ApplicationCommandOption[];
+  selectedCommand: string;
   restartPolicy: RestartPolicy;
   logPolicy: LogPolicy;
   warnings: readonly Pm2ConversionWarning[];
@@ -92,6 +109,7 @@ export interface ImportPreview {
 
 export const defaultRestartPolicy: RestartPolicy = Object.freeze({ mode: 'on-failure', maxRetries: 5, retryDelayMs: 1_000, stableWindowMs: 30_000 });
 export const defaultLogPolicy: LogPolicy = Object.freeze({ maxFiles: 5, maxBytesPerFile: 10 * 1024 * 1024, retentionDays: 14 });
+export const defaultProjectSettings: ProjectSettings = Object.freeze({ startupApplicationIds: [], restartPolicy: defaultRestartPolicy, logPolicy: defaultLogPolicy });
 export const defaultDockyardSettings: DockyardSettings = Object.freeze({ version: 0, retentionDays: 14, maxFiles: 5, maxBytesPerFile: 10 * 1024 * 1024, restartPreset: 'balanced' });
 
 export function restartPolicyForPreset(preset: RestartPreset): RestartPolicy {
@@ -115,14 +133,16 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
   for (const manifestPath of manifests) {
     const manifest = await readJson<PackageManifest>(manifestPath);
     const scripts = isRecord(manifest.scripts) ? manifest.scripts : {};
-    for (const [script, value] of Object.entries(scripts)) {
-      if (typeof value !== 'string' || !runnableScript.test(script)) continue;
-      const cwd = resolve(manifestPath, '..');
-      applications.push({
-        key: `script:${cwd}:${script}`, origin: 'package-script', name: `${manifestName(manifest, cwd)}:${script}`, cwd,
-        command: { executable: packageManagerFor(cwd), args: ['run', script] }, restartPolicy: { ...defaultRestartPolicy }, logPolicy: { ...defaultLogPolicy }, warnings: []
-      });
-    }
+    const cwd = resolve(manifestPath, '..');
+    const commandOptions = Object.entries(scripts)
+      .filter(([script, value]) => typeof value === 'string' && runnableScript.test(script))
+      .map(([name]) => ({ name, command: { executable: packageManagerFor(cwd), args: ['run', name] } }));
+    if (!commandOptions.length) continue;
+    const selected = commandOptions.find((option) => option.name === 'dev') ?? commandOptions.find((option) => option.name === 'start') ?? commandOptions[0]!;
+    applications.push({
+      key: `script:${cwd}`, origin: 'package-script', name: manifestName(manifest, cwd), cwd,
+      command: selected.command, commandOptions, selectedCommand: selected.name, restartPolicy: { ...defaultRestartPolicy }, logPolicy: { ...defaultLogPolicy }, warnings: []
+    });
   }
   if (includePm2) {
     const pm2Files = await discoverPm2Files(root, 3);
@@ -161,6 +181,19 @@ export function redactCommandForDisplay(command: ApplicationCommand): Applicatio
 export function parseApplicationCommand(value: unknown): ApplicationCommand | null {
   if (!isRecord(value) || typeof value.executable !== 'string' || !value.executable || !Array.isArray(value.args) || !value.args.every((arg) => typeof arg === 'string')) return null;
   return { executable: value.executable, args: value.args };
+}
+
+export function parseCommandOptions(value: unknown): ApplicationCommandOption[] | null {
+  if (!Array.isArray(value)) return null;
+  const options = value.map((item) => isRecord(item) && typeof item.name === 'string' && item.name ? { name: item.name, command: parseApplicationCommand(item.command) } : null);
+  if (options.some((option) => option === null || option.command === null)) return null;
+  return options.map((option) => ({ name: option!.name, command: option!.command! }));
+}
+
+export function parseProjectSettings(value: unknown): ProjectSettings | null {
+  if (!isRecord(value) || !Array.isArray(value.startupApplicationIds) || !value.startupApplicationIds.every((id) => typeof id === 'string')) return null;
+  const restartPolicy = parseRestartPolicy(value.restartPolicy); const logPolicy = parseLogPolicy(value.logPolicy);
+  return restartPolicy && logPolicy ? { startupApplicationIds: value.startupApplicationIds, restartPolicy, logPolicy } : null;
 }
 
 export function parseRestartPolicy(value: unknown): RestartPolicy | null {
@@ -229,7 +262,7 @@ function pm2Candidate(value: unknown, file: string, index: number, sharedWarning
   if ('env' in value) warnings.push({ field: 'env', reason: '环境变量不会持久化；请在导入后显式配置。' });
   const script = resolve(cwd, value.script);
   const command = /\.(?:[cm]?js|ts)$/u.test(script) ? { executable: process.execPath, args: [script, ...args] } : { executable: script, args };
-  return [{ key: `pm2:${file}:${index}`, origin: 'pm2-ecosystem', name, cwd, command, restartPolicy: {
+  return [{ key: `pm2:${file}:${index}`, origin: 'pm2-ecosystem', name, cwd, command, commandOptions: [{ name: 'pm2', command }], selectedCommand: 'pm2', restartPolicy: {
     mode: value.autorestart === false ? 'never' : 'on-failure', maxRetries: numberOr(value.max_restarts, defaultRestartPolicy.maxRetries), retryDelayMs: numberOr(value.restart_delay, defaultRestartPolicy.retryDelayMs), stableWindowMs: numberOr(value.min_uptime, defaultRestartPolicy.stableWindowMs)
   }, logPolicy: { ...defaultLogPolicy }, warnings }];
 }
