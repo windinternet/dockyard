@@ -105,7 +105,7 @@ function DockyardApp(): ReactElement {
     source.onmessage = (event) => setLogs((current) => [...current.slice(-249), JSON.parse(event.data) as LogLine]);
     source.onerror = () => source.close(); return () => source.close();
   }, [selected?.id, section, logStream, logsPaused]);
-  useEffect(() => { if ((section !== 'reports' && section !== 'projects') || !apps.length) return; void Promise.all(apps.map(async (app) => [app.id, (await api<{ metrics: Metric[] }>(`/api/applications/${app.id}/metrics`)).metrics] as const)).then((entries) => setMetrics(Object.fromEntries(entries))).catch(() => setMetrics({})); }, [section, apps]);
+  useEffect(() => { if ((section !== 'reports' && section !== 'projects') || !apps.length) return; void Promise.all(apps.map(async (app) => [app.id, (await api<{ metrics: Metric[] }>(`/api/applications/${app.id}/metrics`, { cache: 'no-store' })).metrics] as const)).then((entries) => setMetrics(Object.fromEntries(entries))).catch(() => setMetrics({})); }, [section, apps]);
   useEffect(() => { if (section !== 'settings') return; void Promise.all([api<DaemonSettings>('/api/settings'), api<Health>('/health')]).then(([nextSettings, nextHealth]) => { setSettings(nextSettings); setHealth(nextHealth); }).catch((error) => Toast.error(errorMessage(error))); }, [section]);
 
   const chooseDirectory = async (onSelected: (value: string) => void) => { setBusy(true); try { const result = await api<{ path: string | null }>('/api/system/select-directory', { method: 'POST' }); if (result.path) onSelected(result.path); } catch (error) { Toast.error(errorMessage(error)); } finally { setBusy(false); } };
@@ -162,10 +162,20 @@ function MetricTrend({ samples, kind }: { samples: Metric[]; kind: 'cpu' | 'memo
 
 function TrendSparkline({ values, tone }: { values: number[]; tone: 'cpu' | 'memory' }): ReactElement {
   const chartValues = useTweenedTrend(values);
-  const width = 86; const height = 30; const max = Math.max(...chartValues, tone === 'cpu' ? 100 : 1); const min = tone === 'cpu' ? 0 : Math.min(...chartValues); const span = Math.max(max - min, 0.01);
+  const width = 86; const height = 30; const { min, max } = trendDomain(chartValues, tone); const span = Math.max(max - min, 0.01);
   const points = chartValues.map((value, index) => `${(index / Math.max(chartValues.length - 1, 1)) * width},${height - 3 - ((value - min) / span) * (height - 7)}`);
   const line = points.join(' '); const area = `${points[0]} ${points.slice(1).join(' ')} ${width},${height} 0,${height}`;
   return <svg className="trend-sparkline" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${tone === 'cpu' ? 'CPU' : '内存'}近期趋势`}><polygon className="trend-area" points={area} /><polyline className="trend-line" points={line} /></svg>;
+}
+
+function trendDomain(values: number[], tone: 'cpu' | 'memory'): { min: number; max: number } {
+  const low = Math.min(...values); const high = Math.max(...values); const range = high - low;
+  if (range < 0.001) {
+    const padding = tone === 'cpu' ? Math.max(high * 0.1, 0.1) : Math.max(high * 0.02, 1);
+    return { min: low - padding, max: high + padding };
+  }
+  const padding = Math.max(range * 0.16, tone === 'cpu' ? 0.05 : 0.5);
+  return { min: Math.max(0, low - padding), max: high + padding };
 }
 
 function useTweenedValue(value: number, durationMs = 560): number {

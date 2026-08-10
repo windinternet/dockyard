@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query, Sse } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Header, Param, Patch, Post, Query, Sse } from '@nestjs/common';
 import { parseLogPolicy, parseRestartPolicy, redactCommandForDisplay, type Application } from '@dockyard/core';
 import { Observable } from 'rxjs';
 import { RuntimeService, type LogMessage } from './runtime.service.js';
@@ -8,7 +8,7 @@ export class ApplicationsController {
   @Get() list() { return { applications: this.runtime.applications().map(publicApplication) }; }
   @Get(':id') get(@Param('id') id: string) { return publicApplication(this.runtime.application(id)); }
   @Get(':id/events') events(@Param('id') id: string) { return { events: this.runtime.events(id) }; }
-  @Get(':id/metrics') metrics(@Param('id') id: string) { return { metrics: this.runtime.metrics(id) }; }
+  @Get(':id/metrics') @Header('Cache-Control', 'no-store') metrics(@Param('id') id: string) { return { metrics: this.runtime.metrics(id) }; }
   @Post(':id/start') async start(@Param('id') id: string) { return publicApplication(await this.runtime.start(id)); }
   @Post(':id/stop') async stop(@Param('id') id: string) { return publicApplication(await this.runtime.stop(id)); }
   @Post(':id/restart') async restart(@Param('id') id: string) { return publicApplication(await this.runtime.restart(id)); }
