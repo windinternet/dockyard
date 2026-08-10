@@ -1,0 +1,35 @@
+.app-sider {
+  width: 244px !important;
+  min-width: 244px !important;
+  max-width: 244px !important;
+  overflow: hidden;
+}
+
+.app-sider .semi-navigation,
+.app-sider .semi-navigation-item,
+.app-sider .semi-navigation-item-inner {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.app-sider .semi-navigation-item-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.project-card {
+  min-width: 0;
+}
+
+.project-card .semi-typography {
+  overflow-wrap: anywhere;
+}

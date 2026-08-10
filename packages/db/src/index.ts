@@ -68,9 +68,13 @@ export class DockyardDatabase {
     const now = new Date().toISOString(); const existing = this.db.prepare('SELECT id, path, name, created_at AS createdAt FROM projects WHERE path = ?').get(resolve(path)) as Project | undefined;
     const project = existing ?? { id: randomUUID(), path: resolve(path), name, createdAt: now };
     if (!existing) this.db.prepare('INSERT INTO projects(id, path, name, created_at) VALUES (?, ?, ?, ?)').run(project.id, project.path, project.name, project.createdAt);
-    const upsert = this.db.prepare(`INSERT INTO applications(id, project_id, name, cwd, command_json, restart_policy_json, log_policy_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, name) DO UPDATE SET cwd = excluded.cwd, command_json = excluded.command_json, restart_policy_json = excluded.restart_policy_json, log_policy_json = excluded.log_policy_json, updated_at = excluded.updated_at`);
+    const upsert = this.db.prepare(`INSERT INTO applications(id, project_id, name, cwd, command_json, restart_policy_json, log_policy_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, name) DO UPDATE SET cwd = excluded.cwd, command_json = excluded.command_json, updated_at = excluded.updated_at`);
     const settings = this.settings(); const restartPolicy = restartPolicyForPreset(settings.restartPreset); const logPolicy = { maxFiles: settings.maxFiles, maxBytesPerFile: settings.maxBytesPerFile, retentionDays: settings.retentionDays };
-    for (const candidate of candidates) upsert.run(randomUUID(), project.id, candidate.name, candidate.cwd, JSON.stringify(candidate.command), JSON.stringify(restartPolicy), JSON.stringify(logPolicy), now, now);
+    for (const candidate of candidates) {
+      const candidateRestartPolicy = candidate.origin === 'pm2-ecosystem' ? candidate.restartPolicy : restartPolicy;
+      const candidateLogPolicy = candidate.origin === 'pm2-ecosystem' ? candidate.logPolicy : logPolicy;
+      upsert.run(randomUUID(), project.id, candidate.name, candidate.cwd, JSON.stringify(candidate.command), JSON.stringify(candidateRestartPolicy), JSON.stringify(candidateLogPolicy), now, now);
+    }
     return { project, applications: this.listApplications(project.id) };
   }
   recordEvent(event: Omit<LifecycleEvent, 'id' | 'occurredAt'> & Partial<Pick<LifecycleEvent, 'id' | 'occurredAt'>>): LifecycleEvent { const saved: LifecycleEvent = { id: event.id ?? randomUUID(), occurredAt: event.occurredAt ?? new Date().toISOString(), applicationId: event.applicationId, type: event.type, detail: event.detail }; this.db.prepare('INSERT INTO lifecycle_events(id, application_id, type, occurred_at, detail_json) VALUES (?, ?, ?, ?, ?)').run(saved.id, saved.applicationId, saved.type, saved.occurredAt, JSON.stringify(saved.detail)); return saved; }

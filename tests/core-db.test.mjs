@@ -43,8 +43,10 @@ test('settings are versioned and apply retention and restart presets to managed 
   assert.equal(database.settings().version, 1);
   assert.deepEqual(application?.logPolicy, { retentionDays: 30, maxFiles: 9, maxBytesPerFile: 2_097_152 });
   assert.equal(application?.restartPolicy.mode, 'never');
+  database.updateApplicationPolicies(imported.applications[0].id, { mode: 'always', maxRetries: 3, retryDelayMs: 2_000, stableWindowMs: 60_000 }, { retentionDays: 90, maxFiles: 12, maxBytesPerFile: 4_194_304 });
   database.importProject(preview.root, preview.projectName, preview.applications);
-  assert.equal(database.getApplication(imported.applications[0].id)?.restartPolicy.mode, 'never');
+  assert.deepEqual(database.getApplication(imported.applications[0].id)?.restartPolicy, { mode: 'always', maxRetries: 3, retryDelayMs: 2_000, stableWindowMs: 60_000 });
+  assert.deepEqual(database.getApplication(imported.applications[0].id)?.logPolicy, { retentionDays: 90, maxFiles: 12, maxBytesPerFile: 4_194_304 });
   database.recordMetric({ applicationId: imported.applications[0].id, sampledAt: '2026-08-10T00:00:00.000Z', pid: 1234, cpuPercent: 12.5, uptimeMs: 5_000, restartCount: 0, rssBytes: 1_048_576 });
   assert.deepEqual({ ...database.metrics(imported.applications[0].id, '2026-08-09T00:00:00.000Z')[0] }, { applicationId: imported.applications[0].id, sampledAt: '2026-08-10T00:00:00.000Z', pid: 1234, cpuPercent: 12.5, uptimeMs: 5_000, restartCount: 0, rssBytes: 1_048_576 });
   database.close();
