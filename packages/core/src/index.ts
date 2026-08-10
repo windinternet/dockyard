@@ -47,6 +47,7 @@ export interface Application {
   cwd: string;
   command: ApplicationCommand;
   status: ApplicationStatus;
+  pid: number | null;
   restartPolicy: RestartPolicy;
   logPolicy: LogPolicy;
   createdAt: string;
@@ -64,6 +65,8 @@ export interface LifecycleEvent {
 export interface MetricRollup {
   applicationId: string;
   sampledAt: string;
+  pid: number | null;
+  cpuPercent: number | null;
   uptimeMs: number;
   restartCount: number;
   rssBytes: number | null;

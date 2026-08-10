@@ -45,6 +45,8 @@ test('settings are versioned and apply retention and restart presets to managed 
   assert.equal(application?.restartPolicy.mode, 'never');
   database.importProject(preview.root, preview.projectName, preview.applications);
   assert.equal(database.getApplication(imported.applications[0].id)?.restartPolicy.mode, 'never');
+  database.recordMetric({ applicationId: imported.applications[0].id, sampledAt: '2026-08-10T00:00:00.000Z', pid: 1234, cpuPercent: 12.5, uptimeMs: 5_000, restartCount: 0, rssBytes: 1_048_576 });
+  assert.deepEqual({ ...database.metrics(imported.applications[0].id, '2026-08-09T00:00:00.000Z')[0] }, { applicationId: imported.applications[0].id, sampledAt: '2026-08-10T00:00:00.000Z', pid: 1234, cpuPercent: 12.5, uptimeMs: 5_000, restartCount: 0, rssBytes: 1_048_576 });
   database.close();
 });
 

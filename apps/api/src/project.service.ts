@@ -2,10 +2,11 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { relative, resolve } from 'node:path';
 import { parseApplicationCommand, parseLogPolicy, parseRestartPolicy, scanProject, type ImportPreviewApplication } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
+import { RuntimeService } from './runtime.service.js';
 
 @Injectable()
 export class ProjectService {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(private readonly database: DatabaseService, private readonly runtime: RuntimeService) {}
   async scan(input: unknown) {
     const body = record(input);
     if (!body || typeof body.path !== 'string') throw new BadRequestException('path 必须是绝对目录路径。');
@@ -22,6 +23,10 @@ export class ProjectService {
     return this.database.db.importProject(root, body.name, candidates as ImportPreviewApplication[]);
   }
   list() { return this.database.db.listProjects(); }
+  async start(id: string) { return { applications: await this.runtime.startProject(id) }; }
+  async stop(id: string) { return { applications: await this.runtime.stopProject(id) }; }
+  async restart(id: string) { return { applications: await this.runtime.restartProject(id) }; }
+  async remove(id: string) { await this.runtime.deleteProject(id); return { deleted: true }; }
 }
 function parseCandidate(value: unknown): ImportPreviewApplication | null {
   const body = record(value);
