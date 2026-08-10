@@ -8,10 +8,11 @@ import type { NextFunction, Request, Response } from 'express';
 import { AppModule } from './app.module.js';
 
 async function bootstrap(): Promise<void> {
+  const port = resolvePort(process.env.DOCKYARD_PORT);
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.enableShutdownHooks();
   await mountWebClient(app);
-  await app.listen(process.env.DOCKYARD_PORT ?? 4318, '127.0.0.1');
+  await app.listen(port, '127.0.0.1');
 }
 
 async function mountWebClient(app: NestExpressApplication): Promise<void> {
@@ -44,6 +45,15 @@ async function mountWebClient(app: NestExpressApplication): Promise<void> {
 
 function isWebNavigation(request: Request): boolean {
   return request.method === 'GET' && !request.path.startsWith('/health') && !request.path.startsWith('/api') && !extname(request.path);
+}
+
+function resolvePort(value: string | undefined): number {
+  if (value === undefined) return 4318;
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('DOCKYARD_PORT 必须是 1 到 65535 之间的整数。');
+  }
+  return port;
 }
 
 void bootstrap();
