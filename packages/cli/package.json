@@ -1,0 +1,1 @@
+{ "name": "@dockyard/cli", "version": "0.1.0", "private": true, "type": "module", "bin": { "dockyard": "./dist/index.js" }, "scripts": { "build": "tsc", "typecheck": "tsc --noEmit" }, "dependencies": { "commander": "^13.1.0" } }

@@ -1,0 +1,18 @@
+{
+  "name": "dockyard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first Node.js development operations control plane",
+  "packageManager": "pnpm@10.10.0",
+  "engines": { "node": ">=22.0.0", "pnpm": ">=10.0.0" },
+  "scripts": {
+    "dev": "pnpm --filter @dockyard/api dev",
+    "start": "pnpm --filter @dockyard/api start",
+    "build": "pnpm --filter @dockyard/core build && pnpm --filter @dockyard/db build && pnpm --filter @dockyard/cli build && pnpm --filter @dockyard/web build && pnpm --filter @dockyard/api build",
+    "cli:install": "pnpm --filter @dockyard/cli build && pnpm add --global file:$(pwd)/packages/cli",
+    "typecheck": "pnpm -r typecheck",
+    "docs:check": "node tools/check-docs.mjs",
+    "check": "pnpm docs:check && pnpm typecheck"
+  },
+  "devDependencies": { "@types/node": "^22.15.3", "typescript": "^5.8.3" }
+}

@@ -1,0 +1,1 @@
+{ "extends": "../../tsconfig.base.json", "compilerOptions": { "composite": true, "noEmit": true, "jsx": "react-jsx", "lib": ["ES2023", "DOM", "DOM.Iterable"] }, "include": ["src", "vite.config.ts"] }

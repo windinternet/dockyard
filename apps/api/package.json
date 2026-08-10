@@ -1,0 +1,6 @@
+{
+  "name": "@dockyard/api", "version": "0.1.0", "private": true, "type": "module",
+  "scripts": { "dev": "nest start --watch", "start": "NODE_ENV=production node dist/main.js", "build": "nest build", "typecheck": "tsc --noEmit" },
+  "dependencies": { "@nestjs/common": "^11.0.11", "@nestjs/core": "^11.0.11", "@nestjs/platform-express": "^11.0.11", "reflect-metadata": "^0.2.2", "rxjs": "^7.8.2", "vite": "^6.3.3" },
+  "devDependencies": { "@nestjs/cli": "^11.0.5", "@nestjs/schematics": "^11.0.2", "@nestjs/testing": "^11.0.11", "@types/express": "^5.0.3" }
+}
