@@ -71,6 +71,15 @@ export class DockyardDatabase {
     const result = this.db.prepare('UPDATE projects SET settings_json = ? WHERE id = ?').run(JSON.stringify(settings), id); if (result.changes !== 1) throw new Error('项目不存在。');
     return this.listProjects().find((project) => project.id === id)!;
   }
+  removeApplications(ids: readonly string[]): void {
+    if (!ids.length) return;
+    const placeholders = ids.map(() => '?').join(', '); this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      const projects = this.listProjects(); this.db.prepare(`DELETE FROM metric_rollups WHERE application_id IN (${placeholders})`).run(...ids); this.db.prepare(`DELETE FROM lifecycle_events WHERE application_id IN (${placeholders})`).run(...ids); this.db.prepare(`DELETE FROM applications WHERE id IN (${placeholders})`).run(...ids);
+      for (const project of projects) { const startupApplicationIds = project.settings.startupApplicationIds.filter((id) => !ids.includes(id)); if (startupApplicationIds.length !== project.settings.startupApplicationIds.length) this.db.prepare('UPDATE projects SET settings_json = ? WHERE id = ?').run(JSON.stringify({ ...project.settings, startupApplicationIds }), project.id); }
+      this.db.exec('COMMIT;');
+    } catch (error) { this.db.exec('ROLLBACK;'); throw error; }
+  }
   deleteProject(id: string): void { this.db.exec('BEGIN IMMEDIATE;'); try { this.db.prepare('DELETE FROM metric_rollups WHERE application_id IN (SELECT id FROM applications WHERE project_id = ?)').run(id); this.db.prepare('DELETE FROM lifecycle_events WHERE application_id IN (SELECT id FROM applications WHERE project_id = ?)').run(id); this.db.prepare('DELETE FROM applications WHERE project_id = ?').run(id); const result = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id); if (result.changes !== 1) throw new Error('项目不存在。'); this.db.exec('COMMIT;'); } catch (error) { this.db.exec('ROLLBACK;'); throw error; } }
   importProject(path: string, name: string, candidates: readonly ImportPreviewApplication[]): { project: Project; applications: Application[] } {
     const now = new Date().toISOString(); const existing = (this.db.prepare('SELECT id, path, name, settings_json AS settingsJson, created_at AS createdAt FROM projects WHERE path = ?').get(resolve(path)) as Record<string, unknown> | undefined); const existingProject = existing ? rowToProject(existing) : undefined;

@@ -11,7 +11,11 @@ export class ProjectService {
     const body = record(input);
     if (!body || typeof body.path !== 'string') throw new BadRequestException('path 必须是绝对目录路径。');
     if (body.includePm2 !== undefined && typeof body.includePm2 !== 'boolean') throw new BadRequestException('includePm2 必须是布尔值。');
-    try { return await scanProject(body.path, body.includePm2 !== false); } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法扫描项目。'); }
+    try {
+      const preview = await scanProject(body.path, body.includePm2 !== false); const project = this.database.db.listProjects().find((item) => item.path === preview.root);
+      const staleApplications = project ? staleApplicationsFor(this.database.db.listApplications(project.id), preview.applications).map((application) => ({ id: application.id, name: application.name, cwd: application.cwd })) : [];
+      return { ...preview, staleApplications };
+    } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法扫描项目。'); }
   }
   import(input: unknown) {
     const body = record(input);
@@ -20,6 +24,13 @@ export class ProjectService {
     if (candidates.some((candidate) => candidate === null)) throw new BadRequestException('应用候选包含无效命令或策略。');
     const root = resolve(body.path);
     if ((candidates as ImportPreviewApplication[]).some((candidate) => outside(root, candidate.cwd))) throw new BadRequestException('应用工作目录必须位于导入项目内。');
+    const project = this.database.db.listProjects().find((item) => item.path === root);
+    if (project) {
+      const stale = staleApplicationsFor(this.database.db.listApplications(project.id), candidates as ImportPreviewApplication[]);
+      if (stale.length && body.replaceStale !== true) throw new BadRequestException('检测到过时的脚本级应用记录；请在导入预览中明确确认替换。');
+      if (stale.some((application) => this.runtime.application(application.id).status === 'running')) throw new BadRequestException('请先停止过时的应用记录，再确认替换。');
+      if (body.replaceStale === true) this.database.db.removeApplications(stale.map((application) => application.id));
+    }
     return this.database.db.importProject(root, body.name, candidates as ImportPreviewApplication[]);
   }
   list() { return this.database.db.listProjects(); }
@@ -44,3 +55,4 @@ function parseCandidate(value: unknown): ImportPreviewApplication | null {
 }
 function record(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function outside(root: string, candidate: string): boolean { const path = relative(root, resolve(candidate)); return path === '..' || path.startsWith(`..${'/'}`) || path.startsWith(`..${'\\'}`); }
+function staleApplicationsFor(existing: ReturnType<DatabaseService['db']['listApplications']>, candidates: readonly ImportPreviewApplication[]) { const desired = new Map<string, Set<string>>(); for (const candidate of candidates) { const names = desired.get(candidate.cwd) ?? new Set<string>(); names.add(candidate.name); desired.set(candidate.cwd, names); } return existing.filter((application) => desired.has(application.cwd) && !desired.get(application.cwd)!.has(application.name)); }
