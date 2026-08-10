@@ -2,11 +2,16 @@
   width: 244px !important;
   min-width: 244px !important;
   max-width: 244px !important;
+  height: 100vh;
+  flex: 0 0 244px;
   overflow: hidden;
   border-right: 0 !important;
 }
 
 .app-main {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
   border-left: 1px solid var(--semi-color-border);
 }
 
@@ -20,6 +25,26 @@
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
+}
+
+.app-sider .semi-navigation {
+  border-right: 0;
+}
+
+.app-shell {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body {
+  overflow: hidden;
+}
+
+.app-content {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .app-sider .semi-navigation-item-text {
