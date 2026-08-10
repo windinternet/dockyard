@@ -3,7 +3,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { scanProject } from '../packages/core/dist/index.js';
+import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanProject } from '../packages/core/dist/index.js';
 import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { DatabaseSync } from 'node:sqlite';
@@ -32,9 +32,33 @@ test('database import remains idempotent by project path and application name', 
   database.close();
 });
 
+test('settings are versioned and apply retention and restart presets to managed applications', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-settings-test-'));
+  const database = await DockyardDatabase.open(new PathResolver(state));
+  const preview = await scanProject(fixture, false);
+  const imported = database.importProject(preview.root, preview.projectName, preview.applications);
+  const settings = database.applySettings({ retentionDays: 30, maxFiles: 9, maxBytesPerFile: 2_097_152, restartPreset: 'manual' });
+  const application = database.getApplication(imported.applications[0].id);
+  assert.equal(settings.version, 1);
+  assert.equal(database.settings().version, 1);
+  assert.deepEqual(application?.logPolicy, { retentionDays: 30, maxFiles: 9, maxBytesPerFile: 2_097_152 });
+  assert.equal(application?.restartPolicy.mode, 'never');
+  database.importProject(preview.root, preview.projectName, preview.applications);
+  assert.equal(database.getApplication(imported.applications[0].id)?.restartPolicy.mode, 'never');
+  database.close();
+});
+
 test('native directory picker normalization preserves paths and treats cancellation as empty', () => {
   assert.equal(normalizeSelection('/Users/example/\n'), '/Users/example');
+  assert.equal(normalizeSelection('/'), '/');
+  assert.equal(normalizeSelection('C:\\'), 'C:\\');
   assert.equal(normalizeSelection('   '), null);
+});
+
+test('display redaction covers command flags, JSON values, and authorization headers', () => {
+  assert.equal(redactDisplayText('token=abc Authorization: Bearer xyz {"secret":"keep-out"}'), 'token=[REDACTED] Authorization: Bearer [REDACTED] {"secret":[REDACTED]}');
+  assert.deepEqual(redactCommandForDisplay({ executable: 'node', args: ['--api-key', 'abc', '--token=xyz', '{"password":"no"}'] }), { executable: 'node', args: ['--api-key', '[REDACTED]', '--token=[REDACTED]', '{"password":[REDACTED]}'] });
+  assert.deepEqual(redactDisplayValue({ command: { token: 'abc' }, authorization: 'Bearer xyz' }), { command: { token: '[REDACTED]' }, authorization: '[REDACTED]' });
 });
 
 test('database upgrades the legacy local schema while preserving project and application configuration', async () => {

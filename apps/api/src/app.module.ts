@@ -7,5 +7,7 @@ import { ProjectService } from './project.service.js';
 import { RuntimeService } from './runtime.service.js';
 import { SystemController } from './system.controller.js';
 import { NativeDirectoryPickerService } from './native-directory-picker.service.js';
-@Module({ controllers: [HealthController, ProjectsController, ApplicationsController, SystemController], providers: [DatabaseService, ProjectService, RuntimeService, NativeDirectoryPickerService] })
+import { SettingsController } from './settings.controller.js';
+import { SettingsService } from './settings.service.js';
+@Module({ controllers: [HealthController, ProjectsController, ApplicationsController, SystemController, SettingsController], providers: [DatabaseService, ProjectService, RuntimeService, NativeDirectoryPickerService, SettingsService] })
 export class AppModule {}

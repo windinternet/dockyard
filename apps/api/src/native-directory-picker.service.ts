@@ -12,6 +12,7 @@ export class NativeDirectoryPickerService {
       const selected = await pickDirectoryForPlatform(platform());
       return { path: normalizeSelection(selected) };
     } catch (error) {
+      if (platform() === 'linux' && (error as NodeJS.ErrnoException).code === 'ENOENT') throw new ServiceUnavailableException('未检测到 zenity，无法打开系统目录选择器。请手动输入项目绝对路径。');
       const message = error instanceof Error ? error.message : '无法打开系统目录选择器。';
       throw new ServiceUnavailableException(message);
     }
@@ -31,4 +32,8 @@ export async function pickDirectoryForPlatform(os: NodeJS.Platform): Promise<str
   throw new Error(`当前平台 ${os} 不支持系统目录选择器。请手动输入绝对路径。`);
 }
 
-export function normalizeSelection(value: string): string | null { const path = value.trim(); return path ? path.replace(/[\\/]$/u, '') : null; }
+export function normalizeSelection(value: string): string | null {
+  const path = value.trim();
+  if (!path || path === '/' || /^[A-Za-z]:[\\/]$/u.test(path)) return path || null;
+  return path.replace(/[\\/]$/u, '') || path;
+}

@@ -19,6 +19,15 @@ export interface LogPolicy {
   retentionDays: number;
 }
 
+export type RestartPreset = 'balanced' | 'resilient' | 'manual';
+export interface DockyardSettings {
+  version: number;
+  retentionDays: number;
+  maxFiles: number;
+  maxBytesPerFile: number;
+  restartPreset: RestartPreset;
+}
+
 export interface ApplicationCommand {
   executable: string;
   args: readonly string[];
@@ -80,6 +89,13 @@ export interface ImportPreview {
 
 export const defaultRestartPolicy: RestartPolicy = Object.freeze({ mode: 'on-failure', maxRetries: 5, retryDelayMs: 1_000, stableWindowMs: 30_000 });
 export const defaultLogPolicy: LogPolicy = Object.freeze({ maxFiles: 5, maxBytesPerFile: 10 * 1024 * 1024, retentionDays: 14 });
+export const defaultDockyardSettings: DockyardSettings = Object.freeze({ version: 0, retentionDays: 14, maxFiles: 5, maxBytesPerFile: 10 * 1024 * 1024, restartPreset: 'balanced' });
+
+export function restartPolicyForPreset(preset: RestartPreset): RestartPolicy {
+  if (preset === 'manual') return { mode: 'never', maxRetries: 0, retryDelayMs: 1_000, stableWindowMs: 30_000 };
+  if (preset === 'resilient') return { mode: 'always', maxRetries: 10, retryDelayMs: 1_000, stableWindowMs: 30_000 };
+  return { ...defaultRestartPolicy };
+}
 
 const runnableScript = /(^|:)(dev|start|serve|watch)(:|$)/i;
 const excludedDirectories = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage']);
@@ -118,6 +134,25 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
 
 export function commandDisplay(command: ApplicationCommand): string {
   return [command.executable, ...command.args].map(quoteArgument).join(' ');
+}
+
+/** Redacts values that must never leave a local display boundary. */
+export function redactDisplayText(value: string): string {
+  return value
+    .replace(/((?:authorization)\s*:\s*(?:bearer|basic)\s+)\S+/giu, '$1[REDACTED]')
+    .replace(/((?:["']?(?:api[_-]?key|token|secret|password)["']?)\s*(?:=|:)\s*)(?:"[^"]*"|'[^']*'|[^\s,}\]]+)/giu, '$1[REDACTED]')
+    .replace(/(--(?:api[_-]?key|token|secret|password)(?:=|\s+))\S+/giu, '$1[REDACTED]');
+}
+
+export function redactDisplayValue(value: unknown): unknown {
+  if (typeof value === 'string') return redactDisplayText(value);
+  if (Array.isArray(value)) return value.map(redactDisplayValue);
+  if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, /(?:api[_-]?key|token|secret|password|authorization)/iu.test(key) ? '[REDACTED]' : redactDisplayValue(item)]));
+  return value;
+}
+
+export function redactCommandForDisplay(command: ApplicationCommand): ApplicationCommand {
+  return { executable: redactDisplayText(command.executable), args: command.args.map((argument, index) => index > 0 && /(?:api[_-]?key|token|secret|password)$/iu.test(command.args[index - 1]) ? '[REDACTED]' : redactDisplayText(argument)) };
 }
 
 export function parseApplicationCommand(value: unknown): ApplicationCommand | null {
