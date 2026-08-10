@@ -63,6 +63,29 @@
   white-space: nowrap;
 }
 
+.scan-project-candidate {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px;
+  margin-bottom: 16px;
+  border: 1px solid var(--semi-color-primary-light-default);
+  border-radius: 8px;
+  background: var(--semi-color-primary-light-default);
+}
+
+.scan-project-candidate > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.scan-project-candidate code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .command-picker,
 .startup-rule {
   display: inline-flex;

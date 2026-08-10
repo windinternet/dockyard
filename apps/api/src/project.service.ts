@@ -14,7 +14,12 @@ export class ProjectService {
     try {
       const preview = await scanProject(body.path, body.includePm2 !== false); const project = this.database.db.listProjects().find((item) => item.path === preview.root);
       const staleApplications = project ? staleApplicationsFor(this.database.db.listApplications(project.id), preview.applications).map((application) => ({ id: application.id, name: application.name, cwd: application.cwd })) : [];
-      return { ...preview, staleApplications };
+      return {
+        project: { path: preview.root, name: preview.projectName },
+        applications: preview.applications,
+        warnings: preview.warnings,
+        staleApplications
+      };
     } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法扫描项目。'); }
   }
   import(input: unknown) {
