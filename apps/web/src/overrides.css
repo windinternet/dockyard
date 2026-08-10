@@ -47,20 +47,72 @@
   border-top: 1px solid var(--semi-color-border);
 }
 
-.project-module-table .app-table {
-  min-width: 820px;
+.project-module-table .semi-table-body {
+  scrollbar-gutter: stable;
 }
 
-.project-module-table .app-table td:nth-child(1),
-.project-module-table .app-table td:nth-child(4) {
-  max-width: 260px;
+.project-module-table .semi-table-tbody > tr > td:first-child {
+  max-width: 240px;
 }
 
-.project-module-table code {
+.project-module-table .semi-table-tbody small {
   display: block;
+  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--semi-color-text-2);
+}
+
+.metric-trend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 148px;
+}
+
+.metric-trend b,
+.metric-trend small {
+  display: block;
+}
+
+.metric-trend small,
+.metric-unavailable {
+  color: var(--semi-color-text-2);
+  font-size: 11px;
+}
+
+.trend-sparkline {
+  width: 86px;
+  height: 30px;
+  overflow: visible;
+}
+
+.trend-area {
+  fill: color-mix(in srgb, var(--semi-color-primary) 18%, transparent);
+}
+
+.trend-line {
+  fill: none;
+  stroke: var(--semi-color-primary);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  stroke-dasharray: 160;
+  animation: trend-draw .7s ease-out;
+}
+
+.metric-trend.memory .trend-area {
+  fill: color-mix(in srgb, #0a9d58 18%, transparent);
+}
+
+.metric-trend.memory .trend-line {
+  stroke: #0a9d58;
+}
+
+@keyframes trend-draw {
+  from { stroke-dashoffset: 160; opacity: .35; }
+  to { stroke-dashoffset: 0; opacity: 1; }
 }
 
 .scan-project-candidate {
