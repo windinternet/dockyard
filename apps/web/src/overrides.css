@@ -85,10 +85,6 @@
   display: block;
 }
 
-.metric-trend b {
-  animation: metric-value-pop .36s ease-out;
-}
-
 .metric-trend small,
 .metric-unavailable {
   color: var(--semi-color-text-2);
@@ -103,7 +99,6 @@
 
 .trend-area {
   fill: color-mix(in srgb, var(--semi-color-primary) 18%, transparent);
-  animation: trend-fill .7s ease-out;
 }
 
 .trend-line {
@@ -112,8 +107,6 @@
   stroke-width: 1.6;
   stroke-linejoin: round;
   stroke-linecap: round;
-  stroke-dasharray: 160;
-  animation: trend-draw .7s ease-out;
 }
 
 .metric-trend.memory .trend-area {
@@ -122,21 +115,6 @@
 
 .metric-trend.memory .trend-line {
   stroke: #0a9d58;
-}
-
-@keyframes trend-draw {
-  from { stroke-dashoffset: 160; opacity: .35; }
-  to { stroke-dashoffset: 0; opacity: 1; }
-}
-
-@keyframes trend-fill {
-  from { opacity: .15; transform: scaleY(.18); transform-origin: bottom; }
-  to { opacity: 1; transform: scaleY(1); transform-origin: bottom; }
-}
-
-@keyframes metric-value-pop {
-  from { opacity: .35; transform: translateY(3px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 
 .command-tag {

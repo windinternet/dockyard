@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { StrictMode, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@douyinfe/semi-ui/react19-adapter';
 import { Button, Input, Layout, Modal, Nav, Popover, Table, Tag, Toast, Typography } from '@douyinfe/semi-ui';
@@ -155,16 +155,53 @@ function ProjectApplicationTable({ apps, metrics, onAction, onCommand }: { apps:
 function MetricTrend({ samples, kind }: { samples: Metric[]; kind: 'cpu' | 'memory' }): ReactElement {
   const values = samples.slice(-24).map((sample) => kind === 'cpu' ? sample.cpuPercent : sample.rssBytes === null ? null : sample.rssBytes / 1_048_576).filter((value): value is number => value !== null && Number.isFinite(value));
   const current = values.at(-1);
+  const displayed = useTweenedValue(current ?? 0);
   if (current === undefined) return <span className="metric-unavailable">暂无采样</span>;
-  return <div className={`metric-trend ${kind}`}><div><b key={current}>{kind === 'cpu' ? `${current.toFixed(1)}%` : formatBytes(current * 1_048_576)}</b><small>最近采样</small></div><TrendSparkline values={values} tone={kind} /></div>;
+  return <div className={`metric-trend ${kind}`}><div><b>{kind === 'cpu' ? `${displayed.toFixed(1)}%` : formatBytes(displayed * 1_048_576)}</b><small>最近采样</small></div><TrendSparkline values={values} tone={kind} /></div>;
 }
 
 function TrendSparkline({ values, tone }: { values: number[]; tone: 'cpu' | 'memory' }): ReactElement {
-  const chartValues = values.length === 1 ? [values[0]!, values[0]!] : values;
+  const chartValues = useTweenedTrend(values);
   const width = 86; const height = 30; const max = Math.max(...chartValues, tone === 'cpu' ? 100 : 1); const min = tone === 'cpu' ? 0 : Math.min(...chartValues); const span = Math.max(max - min, 0.01);
   const points = chartValues.map((value, index) => `${(index / Math.max(chartValues.length - 1, 1)) * width},${height - 3 - ((value - min) / span) * (height - 7)}`);
   const line = points.join(' '); const area = `${points[0]} ${points.slice(1).join(' ')} ${width},${height} 0,${height}`;
-  return <svg key={line} className="trend-sparkline" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${tone === 'cpu' ? 'CPU' : '内存'}近期趋势`}><polygon className="trend-area" points={area} /><polyline className="trend-line" points={line} /></svg>;
+  return <svg className="trend-sparkline" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${tone === 'cpu' ? 'CPU' : '内存'}近期趋势`}><polygon className="trend-area" points={area} /><polyline className="trend-line" points={line} /></svg>;
+}
+
+function useTweenedValue(value: number, durationMs = 560): number {
+  const [displayed, setDisplayed] = useState(value);
+  const displayedRef = useRef(value);
+  useEffect(() => {
+    const from = displayedRef.current;
+    if (from === value) return;
+    const startedAt = performance.now(); let frame = 0;
+    const tick = (now: number) => { const progress = Math.min(1, (now - startedAt) / durationMs); const eased = 1 - (1 - progress) ** 3; const next = from + (value - from) * eased; displayedRef.current = next; setDisplayed(next); if (progress < 1) frame = requestAnimationFrame(tick); };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [value, durationMs]);
+  return displayed;
+}
+
+function useTweenedTrend(values: number[], durationMs = 560): number[] {
+  const key = values.join(',');
+  const target = useMemo(() => normalizeTrend(values), [key]);
+  const [displayed, setDisplayed] = useState(target);
+  const displayedRef = useRef(target);
+  useEffect(() => {
+    const from = displayedRef.current;
+    if (from.every((value, index) => value === target[index])) return;
+    const startedAt = performance.now(); let frame = 0;
+    const tick = (now: number) => { const progress = Math.min(1, (now - startedAt) / durationMs); const eased = 1 - (1 - progress) ** 3; const next = from.map((value, index) => value + (target[index]! - value) * eased); displayedRef.current = next; setDisplayed(next); if (progress < 1) frame = requestAnimationFrame(tick); };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [target, durationMs]);
+  return displayed;
+}
+
+function normalizeTrend(values: number[]): number[] {
+  const latest = values.slice(-24);
+  const first = latest[0] ?? 0;
+  return Array.from({ length: 24 }, (_, index) => latest[Math.max(0, index - (24 - latest.length))] ?? first);
 }
 
 function CommandTag({ application, onCommand }: { application: Application; onCommand: (application: Application, selectedCommand: string) => Promise<void> }): ReactElement {
