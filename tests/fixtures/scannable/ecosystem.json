@@ -1,0 +1,5 @@
+{
+  "apps": [
+    { "name": "fixture-pm2", "script": "server.mjs", "autorestart": false, "instances": 2 }
+  ]
+}

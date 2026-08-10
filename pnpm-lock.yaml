@@ -17,6 +17,12 @@ importers:
 
   apps/api:
     dependencies:
+      '@dockyard/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@dockyard/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@nestjs/common':
         specifier: ^11.0.11
         version: 11.1.28(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -79,13 +85,23 @@ importers:
 
   packages/cli:
     dependencies:
+      '@dockyard/core':
+        specifier: workspace:*
+        version: link:../core
+      '@dockyard/db':
+        specifier: workspace:*
+        version: link:../db
       commander:
         specifier: ^13.1.0
         version: 13.1.0
 
   packages/core: {}
 
-  packages/db: {}
+  packages/db:
+    dependencies:
+      '@dockyard/core':
+        specifier: workspace:*
+        version: link:../core
 
 packages:
 

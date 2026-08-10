@@ -11,6 +11,7 @@
     "build": "pnpm --filter @dockyard/core build && pnpm --filter @dockyard/db build && pnpm --filter @dockyard/cli build && pnpm --filter @dockyard/web build && pnpm --filter @dockyard/api build",
     "cli:install": "pnpm --filter @dockyard/cli build && pnpm add --global file:$(pwd)/packages/cli",
     "typecheck": "pnpm -r typecheck",
+    "test": "pnpm build && node --test tests/*.test.mjs",
     "docs:check": "node tools/check-docs.mjs",
     "check": "pnpm docs:check && pnpm typecheck"
   },

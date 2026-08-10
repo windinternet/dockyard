@@ -25,4 +25,4 @@ pnpm dev
 pnpm cli:install
 ```
 
-文档入口是 [`AGENTS.md`](AGENTS.md) 与 [`docs/README.md`](docs/README.md)。当前提交仅提供架构骨架，尚未实现实际进程托管。
+文档入口是 [`AGENTS.md`](AGENTS.md) 与 [`docs/README.md`](docs/README.md)。守护进程提供项目扫描/导入、受监管的应用生命周期、文件日志与 SSE tail、生命周期事件、指标汇总和诊断导出；Web 与 CLI 都通过同一套本机控制平面操作运行时。

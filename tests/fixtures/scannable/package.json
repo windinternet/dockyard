@@ -1,0 +1,8 @@
+{
+  "name": "scannable-fixture",
+  "private": true,
+  "scripts": {
+    "dev": "node server.mjs",
+    "lint": "echo lint"
+  }
+}

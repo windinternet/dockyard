@@ -1,0 +1,18 @@
+import { BadRequestException, Controller, Get, Param, Post, Query, Sse } from '@nestjs/common';
+import type { Application } from '@dockyard/core';
+import { Observable } from 'rxjs';
+import { RuntimeService, type LogMessage } from './runtime.service.js';
+@Controller('api/applications')
+export class ApplicationsController {
+  constructor(private readonly runtime: RuntimeService) {}
+  @Get() list() { return { applications: this.runtime.applications().map(publicApplication) }; }
+  @Get(':id') get(@Param('id') id: string) { return publicApplication(this.runtime.application(id)); }
+  @Get(':id/events') events(@Param('id') id: string) { return { events: this.runtime.events(id) }; }
+  @Get(':id/metrics') metrics(@Param('id') id: string) { return { metrics: this.runtime.metrics(id) }; }
+  @Post(':id/start') async start(@Param('id') id: string) { return publicApplication(await this.runtime.start(id)); }
+  @Post(':id/stop') async stop(@Param('id') id: string) { return publicApplication(await this.runtime.stop(id)); }
+  @Post(':id/restart') async restart(@Param('id') id: string) { return publicApplication(await this.runtime.restart(id)); }
+  @Post(':id/diagnostics') diagnostics(@Param('id') id: string) { return this.runtime.diagnostics(id); }
+  @Sse(':id/logs/tail') tail(@Param('id') id: string, @Query('stream') stream = 'stdout'): Observable<MessageEvent> { this.runtime.application(id); if (stream !== 'stdout' && stream !== 'stderr') throw new BadRequestException('stream 必须是 stdout 或 stderr。'); return new Observable((subscriber) => { const remove = this.runtime.onLog((message: LogMessage) => { if (message.applicationId === id && message.stream === stream) subscriber.next({ data: message } as MessageEvent); }); return remove; }); }
+}
+function publicApplication(application: Application): Application { return { ...application, command: { ...application.command, args: application.command.args.map((arg, index) => index > 0 && /(?:api[_-]?key|token|secret|password)$/iu.test(application.command.args[index - 1]) ? '[REDACTED]' : arg.replace(/((?:api[_-]?key|token|secret|password)\s*(?:=|:)\s*)\S+/giu, '$1[REDACTED]')) } }; }
