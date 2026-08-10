@@ -15,7 +15,7 @@ export class PathResolver {
 export class DockyardDatabase {
   private readonly db: DatabaseSync;
   private constructor(private readonly paths: PathResolver, db: DatabaseSync) { this.db = db; }
-  static async open(paths = new PathResolver()): Promise<DockyardDatabase> { await mkdir(dirname(paths.databasePath()), { recursive: true }); const db = new DatabaseSync(paths.databasePath()); const database = new DockyardDatabase(paths, db); database.migrate(); return database; }
+  static async open(paths = new PathResolver()): Promise<DockyardDatabase> { await mkdir(dirname(paths.databasePath()), { recursive: true }); const db = new DatabaseSync(paths.databasePath()); const database = new DockyardDatabase(paths, db); database.upgradeLegacySchema(); database.migrate(); return database; }
   close(): void { this.db.close(); }
   get pathResolver(): PathResolver { return this.paths; }
   migrate(): void {
@@ -26,6 +26,31 @@ export class DockyardDatabase {
       CREATE TABLE IF NOT EXISTS metric_rollups (application_id TEXT NOT NULL REFERENCES applications(id), sampled_at TEXT NOT NULL, uptime_ms INTEGER NOT NULL, restart_count INTEGER NOT NULL, rss_bytes INTEGER, PRIMARY KEY(application_id, sampled_at));
       INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, datetime('now'));`);
   }
+  /** Migrates the pre-MVP prototype schema without requiring users to delete local state. */
+  private upgradeLegacySchema(): void {
+    const columns = this.db.prepare("SELECT name FROM pragma_table_info('applications')").all() as Array<{ name: string }>;
+    if (!columns.length || columns.some((column) => column.name === 'command_json')) return;
+    const projects = this.db.prepare('SELECT id, path, name, created_at AS createdAt FROM projects').all() as Array<{ id: string; path: string; name: string; createdAt: string }>;
+    const applications = this.db.prepare('SELECT id, project_id AS projectId, name, cwd, command, args_json AS argsJson, restart_mode AS restartMode, max_retries AS maxRetries, retry_delay_ms AS retryDelayMs, stable_window_ms AS stableWindowMs, log_max_files AS maxFiles, log_max_bytes_per_file AS maxBytesPerFile, log_retention_days AS retentionDays, created_at AS createdAt, updated_at AS updatedAt FROM applications').all() as Array<Record<string, unknown>>;
+    const events = this.tableExists('lifecycle_events') ? this.db.prepare('SELECT id, application_id AS applicationId, type, occurred_at AS occurredAt, detail_json AS detailJson FROM lifecycle_events').all() as Array<Record<string, unknown>> : [];
+    const metrics = this.tableExists('metric_rollups') ? this.db.prepare('SELECT application_id AS applicationId, sampled_at AS sampledAt, uptime_ms AS uptimeMs, restart_count AS restartCount, rss_bytes AS rssBytes FROM metric_rollups').all() as Array<Record<string, unknown>> : [];
+    this.db.exec('DROP TABLE IF EXISTS lifecycle_events; DROP TABLE IF EXISTS metric_rollups; DROP TABLE applications; DROP TABLE projects;');
+    this.migrate();
+    const insertProject = this.db.prepare('INSERT INTO projects(id, path, name, created_at) VALUES (?, ?, ?, ?)');
+    for (const project of projects) insertProject.run(project.id, project.path, project.name, project.createdAt);
+    const insertApplication = this.db.prepare('INSERT INTO applications(id, project_id, name, cwd, command_json, restart_policy_json, log_policy_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    for (const application of applications) {
+      const args = safeArray(application.argsJson); const command = { executable: String(application.command), args };
+      const restart = { mode: application.restartMode, maxRetries: Number(application.maxRetries), retryDelayMs: Number(application.retryDelayMs), stableWindowMs: Number(application.stableWindowMs) };
+      const log = { maxFiles: Number(application.maxFiles), maxBytesPerFile: Number(application.maxBytesPerFile), retentionDays: Number(application.retentionDays) };
+      insertApplication.run(String(application.id), String(application.projectId), String(application.name), String(application.cwd), JSON.stringify(command), JSON.stringify(restart), JSON.stringify(log), String(application.createdAt), String(application.updatedAt));
+    }
+    const insertEvent = this.db.prepare('INSERT INTO lifecycle_events(id, application_id, type, occurred_at, detail_json) VALUES (?, ?, ?, ?, ?)');
+    for (const event of events) insertEvent.run(String(event.id), String(event.applicationId), String(event.type), String(event.occurredAt), String(event.detailJson));
+    const insertMetric = this.db.prepare('INSERT INTO metric_rollups(application_id, sampled_at, uptime_ms, restart_count, rss_bytes) VALUES (?, ?, ?, ?, ?)');
+    for (const metric of metrics) insertMetric.run(String(metric.applicationId), String(metric.sampledAt), Number(metric.uptimeMs), Number(metric.restartCount), numberOrNull(metric.rssBytes));
+  }
+  private tableExists(name: string): boolean { return Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name)); }
   listProjects(): Project[] { return (this.db.prepare('SELECT id, path, name, created_at AS createdAt FROM projects ORDER BY name').all() as unknown as Project[]); }
   listApplications(projectId?: string): Application[] { const sql = `SELECT a.id, a.project_id AS projectId, a.name, a.cwd, a.command_json AS commandJson, a.restart_policy_json AS restartPolicyJson, a.log_policy_json AS logPolicyJson, a.created_at AS createdAt, a.updated_at AS updatedAt FROM applications a ${projectId ? 'WHERE a.project_id = ?' : ''} ORDER BY a.name`; return (projectId ? this.db.prepare(sql).all(projectId) : this.db.prepare(sql).all()).map(rowToApplication); }
   getApplication(id: string): Application | null { const row = this.db.prepare('SELECT id, project_id AS projectId, name, cwd, command_json AS commandJson, restart_policy_json AS restartPolicyJson, log_policy_json AS logPolicyJson, created_at AS createdAt, updated_at AS updatedAt FROM applications WHERE id = ?').get(id); return row ? rowToApplication(row) : null; }
@@ -44,3 +69,5 @@ export class DockyardDatabase {
 }
 function rowToApplication(row: Record<string, unknown>): Application { return { id: String(row.id), projectId: String(row.projectId), name: String(row.name), cwd: String(row.cwd), command: JSON.parse(String(row.commandJson)) as ApplicationCommand, status: 'stopped', restartPolicy: JSON.parse(String(row.restartPolicyJson)) as RestartPolicy, logPolicy: JSON.parse(String(row.logPolicyJson)) as LogPolicy, createdAt: String(row.createdAt), updatedAt: String(row.updatedAt) }; }
 function defaultStateDirectory(): string { const base = process.env.XDG_STATE_HOME || (platform() === 'darwin' ? join(homedir(), 'Library', 'Application Support') : join(homedir(), '.local', 'state')); return join(base, 'dockyard'); }
+function safeArray(value: unknown): string[] { try { const parsed: unknown = JSON.parse(String(value)); return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string') ? parsed : []; } catch { return []; } }
+function numberOrNull(value: unknown): number | null { return typeof value === 'number' ? value : null; }
