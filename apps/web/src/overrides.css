@@ -44,10 +44,7 @@
 }
 
 .project-module-table {
-  height: 340px;
   border-top: 1px solid var(--semi-color-border);
-  overflow: auto;
-  scrollbar-gutter: stable;
 }
 
 .project-module-table .app-table {
@@ -57,15 +54,6 @@
 .project-module-table .app-table td:nth-child(1),
 .project-module-table .app-table td:nth-child(4) {
   max-width: 260px;
-}
-
-.project-module-table .app-table th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  padding-top: 12px;
-  background: var(--semi-color-bg-1);
-  box-shadow: 0 1px var(--semi-color-border);
 }
 
 .project-module-table code {
