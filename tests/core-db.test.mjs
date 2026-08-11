@@ -10,7 +10,7 @@ import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { ProjectService } from '../apps/api/dist/project.service.js';
 import { externalLogFilesFromDescriptors, matchingProcesses, parseProcessTable, readLogTail, RuntimeService, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
-import { runtimeEvent } from '../apps/api/dist/applications.controller.js';
+import { ApplicationsController, runtimeEvent } from '../apps/api/dist/applications.controller.js';
 import { DatabaseSync } from 'node:sqlite';
 
 const fixture = resolve('tests/fixtures/scannable');
@@ -19,6 +19,22 @@ const monorepoFixture = resolve('tests/fixtures/monorepo');
 test('runtime SSE emits named events so subscribed UI handlers receive metrics', () => {
   const event = runtimeEvent({ type: 'metric', metric: { applicationId: 'app-1', sampledAt: '2026-08-11T00:00:00.000Z', pid: 1, cpuPercent: 0, uptimeMs: 1, restartCount: 0, rssBytes: 1 } });
   assert.equal(event.type, 'metric');
+});
+
+test('combined log tail replays and follows stdout and stderr through one subscription', async () => {
+  let emit;
+  const controller = new ApplicationsController({
+    application: () => ({}),
+    onLog: (listener) => { emit = listener; return () => undefined; },
+    logTail: async (_id, stream) => [{ applicationId: 'app-1', stream, at: stream === 'stdout' ? '2026-08-11T00:00:00.000Z' : '2026-08-11T00:00:01.000Z', line: `${stream}-history` }],
+  });
+  const messages = [];
+  const subscription = controller.tail('app-1', 'combined').subscribe((event) => messages.push(event.data));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  emit({ applicationId: 'app-1', stream: 'stderr', at: '2026-08-11T00:00:02.000Z', line: 'stderr-live' });
+  emit({ applicationId: 'app-1', stream: 'stdout', at: '2026-08-11T00:00:03.000Z', line: 'stdout-live' });
+  subscription.unsubscribe();
+  assert.deepEqual(messages.map((message) => [message.stream, message.line]), [['stdout', 'stdout-history'], ['stderr', 'stderr-history'], ['stderr', 'stderr-live'], ['stdout', 'stdout-live']]);
 });
 
 test('scanner reads runnable package scripts and static PM2 literals without executing them', async () => {

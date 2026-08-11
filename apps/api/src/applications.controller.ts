@@ -16,18 +16,19 @@ export class ApplicationsController {
   @Patch(':id/policies') policies(@Param('id') id: string, @Body() body: unknown) { const value = record(body); const restartPolicy = parseRestartPolicy(value?.restartPolicy); const logPolicy = parseLogPolicy(value?.logPolicy); if (!restartPolicy || !logPolicy) throw new BadRequestException('重启或日志策略无效。'); return publicApplication(this.runtime.updatePolicies(id, restartPolicy, logPolicy)); }
   @Patch(':id/command') command(@Param('id') id: string, @Body() body: unknown) { const value = record(body); if (!value || typeof value.selectedCommand !== 'string') throw new BadRequestException('启动命令无效。'); return publicApplication(this.runtime.updateCommand(id, value.selectedCommand)); }
   @Post(':id/diagnostics') diagnostics(@Param('id') id: string) { return this.runtime.diagnostics(id); }
-  @Sse(':id/logs/tail') tail(@Param('id') id: string, @Query('stream') stream = 'stdout'): Observable<MessageEvent> {
+  @Sse(':id/logs/tail') tail(@Param('id') id: string, @Query('stream') stream = 'combined'): Observable<MessageEvent> {
     this.runtime.application(id);
-    if (stream !== 'stdout' && stream !== 'stderr') throw new BadRequestException('stream 必须是 stdout 或 stderr。');
+    if (stream !== 'stdout' && stream !== 'stderr' && stream !== 'combined') throw new BadRequestException('stream 必须是 stdout、stderr 或 combined。');
     return new Observable((subscriber) => {
       let replaying = true;
       const pending: LogMessage[] = [];
       const publish = (message: LogMessage) => subscriber.next({ data: message } as MessageEvent);
       const remove = this.runtime.onLog((message) => {
-        if (message.applicationId !== id || message.stream !== stream) return;
+        if (message.applicationId !== id || (stream !== 'combined' && message.stream !== stream)) return;
         if (replaying) pending.push(message); else publish(message);
       });
-      void this.runtime.logTail(id, stream).then((history) => {
+      const history = stream === 'combined' ? Promise.all([this.runtime.logTail(id, 'stdout'), this.runtime.logTail(id, 'stderr')]).then((logs) => logs.flat().sort((left, right) => left.at.localeCompare(right.at))) : this.runtime.logTail(id, stream);
+      void history.then((history) => {
         for (const message of history) publish(message);
         replaying = false;
         for (const message of pending) publish(message);
