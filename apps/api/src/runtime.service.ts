@@ -6,17 +6,19 @@ import { EventEmitter } from 'node:events';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { platform } from 'node:os';
 import { promisify } from 'node:util';
-import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, type Application, type ApplicationStatus, type LogStream, type ProjectSettings } from '@dockyard/core';
+import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, type Application, type ApplicationStatus, type LogStream, type MetricRollup, type ProjectSettings } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
 
 interface Runtime { child: ChildProcess; application: Application; status: ApplicationStatus; startedAt: number; retries: number; manuallyStopped: boolean; }
 export interface LogMessage { applicationId: string; stream: LogStream; at: string; line: string; }
+export type RuntimeUpdate = { type: 'application'; application: Application } | { type: 'metric'; metric: MetricRollup };
 
 @Injectable()
 export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly runtimes = new Map<string, Runtime>();
   private readonly terminalStatuses = new Map<string, ApplicationStatus>();
   private readonly logs = new EventEmitter();
+  private readonly updates = new EventEmitter();
   private sampler: ReturnType<typeof setInterval>;
   constructor(private readonly database: DatabaseService) { this.sampler = this.createSampler(1_000); }
   onApplicationBootstrap(): void { this.setSampleInterval(this.database.db.settings().sampleIntervalMs); }
@@ -39,9 +41,11 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   async stop(id: string): Promise<Application> { const runtime = this.runtimes.get(id); this.terminalStatuses.set(id, 'stopped'); if (!runtime) return this.application(id); runtime.manuallyStopped = true; runtime.status = 'stopped'; const exited = new Promise<void>((done) => runtime.child.once('exit', () => done())); runtime.child.kill('SIGTERM'); try { await Promise.race([exited, new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new RequestTimeoutException('应用未在 5 秒内优雅退出。它仍在运行，未执行强制终止；请检查日志和进程状态。')), 5_000); timer.unref(); })]); } catch (error) { runtime.status = 'running'; this.terminalStatuses.set(id, 'running'); throw error; } this.database.db.recordEvent({ applicationId: id, type: 'stopped', detail: { signal: 'SIGTERM' } }); return this.application(id); }
   reloadRunningPolicies(): void { for (const [id, runtime] of this.runtimes) { const current = this.database.db.getApplication(id); if (current) runtime.application = current; } }
   onLog(listener: (message: LogMessage) => void): () => void { this.logs.on('line', listener); return () => this.logs.off('line', listener); }
+  onUpdate(listener: (update: RuntimeUpdate) => void): () => void { this.updates.on('update', listener); return () => this.updates.off('update', listener); }
   private launch(application: Application, retries: number): void {
     const child = spawn(application.command.executable, [...application.command.args], { cwd: application.cwd, shell: false, stdio: ['ignore', 'pipe', 'pipe'], env: inheritedEnvironment() });
     const runtime: Runtime = { child, application, status: 'running', startedAt: Date.now(), retries, manuallyStopped: false }; this.runtimes.set(application.id, runtime);
+    this.emitApplication(application.id);
     const logDirectory = this.database.db.pathResolver.logDirectory(application.projectId, application.id); mkdirSync(logDirectory, { recursive: true });
     if (child.stdout) this.pipeLogs(application.id, 'stdout', child.stdout, logDirectory, () => runtime.application.logPolicy);
     if (child.stderr) this.pipeLogs(application.id, 'stderr', child.stderr, logDirectory, () => runtime.application.logPolicy);
@@ -54,16 +58,17 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     if (this.runtimes.get(applicationId) !== runtime) return; this.runtimes.delete(applicationId); const application = runtime.application; const elapsed = Date.now() - runtime.startedAt;
     this.database.db.recordEvent({ applicationId, type: 'exited', detail: { code, signal, error, runtimeMs: elapsed } });
     const shouldRetry = !runtime.manuallyStopped && (application.restartPolicy.mode === 'always' || (application.restartPolicy.mode === 'on-failure' && code !== 0));
-    if (!shouldRetry) { this.terminalStatuses.set(application.id, runtime.manuallyStopped ? 'stopped' : code === 0 ? 'stopped' : 'crashed'); return; }
+    if (!shouldRetry) { this.terminalStatuses.set(application.id, runtime.manuallyStopped ? 'stopped' : code === 0 ? 'stopped' : 'crashed'); this.emitApplication(application.id); return; }
     if (elapsed >= application.restartPolicy.stableWindowMs) runtime.retries = 0;
-    if (runtime.retries >= application.restartPolicy.maxRetries) { this.terminalStatuses.set(application.id, 'crashed'); this.database.db.recordEvent({ applicationId: application.id, type: 'crashed', detail: { reason: 'restart-budget-exhausted', retries: runtime.retries } }); return; }
-    const delay = application.restartPolicy.retryDelayMs * 2 ** runtime.retries; this.database.db.recordEvent({ applicationId: application.id, type: 'restart-scheduled', detail: { delayMs: delay, retry: runtime.retries + 1 } }); const timer = setTimeout(() => this.launch(application, runtime.retries + 1), delay); timer.unref();
+    if (runtime.retries >= application.restartPolicy.maxRetries) { this.terminalStatuses.set(application.id, 'crashed'); this.database.db.recordEvent({ applicationId: application.id, type: 'crashed', detail: { reason: 'restart-budget-exhausted', retries: runtime.retries } }); this.emitApplication(application.id); return; }
+    const delay = application.restartPolicy.retryDelayMs * 2 ** runtime.retries; this.terminalStatuses.set(application.id, 'restarting'); this.emitApplication(application.id); this.database.db.recordEvent({ applicationId: application.id, type: 'restart-scheduled', detail: { delayMs: delay, retry: runtime.retries + 1 } }); const timer = setTimeout(() => this.launch(application, runtime.retries + 1), delay); timer.unref();
   }
   private withStatus(application: Application): Application { const runtime = this.runtimes.get(application.id); return { ...application, status: runtime?.status ?? this.terminalStatuses.get(application.id) ?? 'stopped', pid: runtime?.child.pid ?? null }; }
   private project(id: string) { const project = this.database.db.listProjects().find((item) => item.id === id); if (!project) throw new NotFoundException('项目不存在。'); return project; }
   private sample(): void { for (const [applicationId, runtime] of this.runtimes) void this.sampleRuntime(applicationId, runtime); }
   private createSampler(intervalMs: number): ReturnType<typeof setInterval> { const sampler = setInterval(() => this.sample(), intervalMs); sampler.unref(); return sampler; }
-  private async sampleRuntime(applicationId: string, runtime: Runtime): Promise<void> { const process = await inspectProcess(runtime.child.pid); this.database.db.recordMetric({ applicationId, sampledAt: new Date().toISOString(), pid: runtime.child.pid ?? null, cpuPercent: process?.cpuPercent ?? null, uptimeMs: Date.now() - runtime.startedAt, restartCount: runtime.retries, rssBytes: process?.rssBytes ?? null }); }
+  private async sampleRuntime(applicationId: string, runtime: Runtime): Promise<void> { const process = await inspectProcess(runtime.child.pid); if (this.runtimes.get(applicationId) !== runtime) return; const metric: MetricRollup = { applicationId, sampledAt: new Date().toISOString(), pid: runtime.child.pid ?? null, cpuPercent: process?.cpuPercent ?? null, uptimeMs: Date.now() - runtime.startedAt, restartCount: runtime.retries, rssBytes: process?.rssBytes ?? null }; this.database.db.recordMetric(metric); this.updates.emit('update', { type: 'metric', metric } satisfies RuntimeUpdate); }
+  private emitApplication(id: string): void { const application = this.database.db.getApplication(id); if (application) this.updates.emit('update', { type: 'application', application: this.withStatus(application) } satisfies RuntimeUpdate); }
 }
 async function inspectProcess(pid: number | undefined): Promise<{ cpuPercent: number | null; rssBytes: number | null } | null> { if (!pid || platform() === 'win32') return null; try { const { stdout } = await promisify(execFile)('ps', ['-o', 'rss=,pcpu=', '-p', String(pid)], { timeout: 1_000 }); const [rss, cpu] = stdout.trim().split(/\s+/u).map(Number); return Number.isFinite(rss) && Number.isFinite(cpu) ? { rssBytes: rss * 1024, cpuPercent: cpu } : null; } catch { return null; } }
 function inheritedEnvironment(): NodeJS.ProcessEnv {

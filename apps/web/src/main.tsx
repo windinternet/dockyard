@@ -88,7 +88,14 @@ function DockyardApp(): ReactElement {
       setSelectedId((current) => current || applicationResult.applications[0]?.id || '');
     } catch { Toast.error('无法连接本机守护进程。'); }
   };
-  useEffect(() => { void refresh(); const interval = section === 'projects' ? Math.max(1_000, settings?.sampleIntervalMs ?? 1_000) : 4_000; const timer = window.setInterval(() => void refresh(), interval); return () => window.clearInterval(timer); }, [section, settings?.sampleIntervalMs]);
+  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    const source = new EventSource('/api/applications/stream');
+    const application = (event: Event) => { const next = JSON.parse((event as MessageEvent<string>).data) as Application; setApps((current) => current.map((item) => item.id === next.id ? next : item)); };
+    const metric = (event: Event) => { const next = JSON.parse((event as MessageEvent<string>).data) as Metric & { applicationId: string }; setMetrics((current) => { const existing = current[next.applicationId] ?? []; if (existing.some((sample) => sample.sampledAt === next.sampledAt)) return current; const cutoff = Date.now() - 24 * 60 * 60 * 1_000; return { ...current, [next.applicationId]: [...existing, next].filter((sample) => Date.parse(sample.sampledAt) >= cutoff) }; }); };
+    source.addEventListener('application', application); source.addEventListener('metric', metric);
+    return () => { source.removeEventListener('application', application); source.removeEventListener('metric', metric); source.close(); };
+  }, []);
   useEffect(() => { void api<DaemonSettings>('/api/settings').then(setSettings).catch(() => undefined); }, []);
   useEffect(() => { localStorage.setItem('dockyard-theme', dark ? 'dark' : 'light'); }, [dark]);
   useEffect(() => { localStorage.setItem('dockyard-locale', locale); document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en'; }, [locale]);
@@ -105,7 +112,7 @@ function DockyardApp(): ReactElement {
     source.onmessage = (event) => setLogs((current) => [...current.slice(-249), JSON.parse(event.data) as LogLine]);
     source.onerror = () => source.close(); return () => source.close();
   }, [selected?.id, section, logStream, logsPaused]);
-  useEffect(() => { if ((section !== 'reports' && section !== 'projects') || !apps.length) return; void Promise.all(apps.map(async (app) => [app.id, (await api<{ metrics: Metric[] }>(`/api/applications/${app.id}/metrics`, { cache: 'no-store' })).metrics] as const)).then((entries) => setMetrics(Object.fromEntries(entries))).catch(() => setMetrics({})); }, [section, apps]);
+  useEffect(() => { if ((section !== 'reports' && section !== 'projects') || !apps.length) return; let active = true; void Promise.all(apps.map(async (app) => [app.id, (await api<{ metrics: Metric[] }>(`/api/applications/${app.id}/metrics`, { cache: 'no-store' })).metrics] as const)).then((entries) => { if (active) setMetrics(Object.fromEntries(entries)); }).catch(() => { if (active) setMetrics({}); }); return () => { active = false; }; }, [section, apps]);
   useEffect(() => { if (section !== 'settings') return; void Promise.all([api<DaemonSettings>('/api/settings'), api<Health>('/health')]).then(([nextSettings, nextHealth]) => { setSettings(nextSettings); setHealth(nextHealth); }).catch((error) => Toast.error(errorMessage(error))); }, [section]);
 
   const chooseDirectory = async (onSelected: (value: string) => void) => { setBusy(true); try { const result = await api<{ path: string | null }>('/api/system/select-directory', { method: 'POST' }); if (result.path) onSelected(result.path); } catch (error) { Toast.error(errorMessage(error)); } finally { setBusy(false); } };
