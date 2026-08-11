@@ -8,10 +8,16 @@ import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { ProjectService } from '../apps/api/dist/project.service.js';
 import { matchingProcesses, parseProcessTable, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
+import { runtimeEvent } from '../apps/api/dist/applications.controller.js';
 import { DatabaseSync } from 'node:sqlite';
 
 const fixture = resolve('tests/fixtures/scannable');
 const monorepoFixture = resolve('tests/fixtures/monorepo');
+
+test('runtime SSE emits named events so subscribed UI handlers receive metrics', () => {
+  const event = runtimeEvent({ type: 'metric', metric: { applicationId: 'app-1', sampledAt: '2026-08-11T00:00:00.000Z', pid: 1, cpuPercent: 0, uptimeMs: 1, restartCount: 0, rssBytes: 1 } });
+  assert.equal(event.type, 'metric');
+});
 
 test('scanner reads runnable package scripts and static PM2 literals without executing them', async () => {
   const preview = await scanProject(fixture, true);

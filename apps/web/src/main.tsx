@@ -26,6 +26,9 @@ interface Metric { sampledAt: string; pid: number | null; cpuPercent: number | n
 interface DaemonSettings { version: number; stateDirectory: string; sampleIntervalMs: number; retentionDays: number; maxFiles: number; maxBytesPerFile: number; restartPreset: 'balanced' | 'resilient' | 'manual'; }
 interface Health { status: string; service: string; version: string; }
 
+const sections: readonly Section[] = ['overview', 'projects', 'troubleshooting', 'logs', 'reports', 'settings'];
+function sectionFromLocation(): Section { const value = window.location.hash.slice(1); return (sections as readonly string[]).includes(value) ? value as Section : 'overview'; }
+
 /** Versioned, stable-key UI catalog. User choice stays in local browser storage. */
 const messages = {
   'page.overview.title': { zh: '运行总览', en: 'Overview' }, 'page.overview.eyebrow': { zh: '本机 Node.js 应用运行状态一目了然', en: 'Local Node.js runtime status at a glance' },
@@ -54,7 +57,7 @@ const copy: Record<Section, { title: keyof typeof messages; eyebrow: keyof typeo
 };
 
 function DockyardApp(): ReactElement {
-  const [section, setSection] = useState<Section>('overview');
+  const [section, setSection] = useState<Section>(sectionFromLocation);
   const [dark, setDark] = useState(() => localStorage.getItem('dockyard-theme') === 'dark');
   const [locale, setLocale] = useState<Locale>(() => localStorage.getItem('dockyard-locale') === 'en' ? 'en' : 'zh');
   const [apps, setApps] = useState<Application[]>([]);
@@ -91,15 +94,16 @@ function DockyardApp(): ReactElement {
   useEffect(() => { void refresh(); }, []);
   useEffect(() => {
     const source = new EventSource('/api/applications/stream');
-    const application = (event: Event) => { const next = JSON.parse((event as MessageEvent<string>).data) as Application; setApps((current) => current.map((item) => item.id === next.id ? next : item)); };
+    const application = (event: Event) => { const next = JSON.parse((event as MessageEvent<string>).data) as Application; setApps((current) => current.some((item) => item.id === next.id) ? current.map((item) => item.id === next.id ? next : item) : [...current, next]); };
     const metric = (event: Event) => { const next = JSON.parse((event as MessageEvent<string>).data) as Metric & { applicationId: string }; setMetrics((current) => { const existing = current[next.applicationId] ?? []; if (existing.some((sample) => sample.sampledAt === next.sampledAt)) return current; const cutoff = Date.now() - 24 * 60 * 60 * 1_000; return { ...current, [next.applicationId]: [...existing, next].filter((sample) => Date.parse(sample.sampledAt) >= cutoff) }; }); };
-    const project = (event: Event) => { const next = JSON.parse((event as MessageEvent<string>).data) as Project; setProjects((current) => current.map((item) => item.id === next.id ? next : item)); };
+    const project = (event: Event) => { const next = JSON.parse((event as MessageEvent<string>).data) as Project; setProjects((current) => current.some((item) => item.id === next.id) ? current.map((item) => item.id === next.id ? next : item) : [...current, next]); };
     source.addEventListener('application', application); source.addEventListener('metric', metric); source.addEventListener('project', project);
     return () => { source.removeEventListener('application', application); source.removeEventListener('metric', metric); source.removeEventListener('project', project); source.close(); };
   }, []);
   useEffect(() => { void api<DaemonSettings>('/api/settings').then(setSettings).catch(() => undefined); }, []);
   useEffect(() => { localStorage.setItem('dockyard-theme', dark ? 'dark' : 'light'); }, [dark]);
   useEffect(() => { localStorage.setItem('dockyard-locale', locale); document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en'; }, [locale]);
+  useEffect(() => { const syncSection = () => setSection(sectionFromLocation()); window.addEventListener('hashchange', syncSection); return () => window.removeEventListener('hashchange', syncSection); }, []);
   useEffect(() => {
     const replacements = locale === 'en' ? englishPhrases : Object.fromEntries(Object.entries(englishPhrases).map(([zh, en]) => [en, zh]));
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -125,7 +129,7 @@ function DockyardApp(): ReactElement {
   const action = (app: Application, operation: 'start' | 'stop' | 'restart') => { if (operation === 'start') void executeAction(app, operation); else setPendingAction({ app, operation }); };
   const openProject = () => { setPreview(null); setScanOpen(true); };
   const openProjectDirectory = () => { setDirectoryPreview(null); setDirectoryScanOpen(true); };
-  const navigate = (target: Section) => { setSection(target); if (target === 'logs' || target === 'troubleshooting') setSelectedId(selected?.id ?? apps[0]?.id ?? ''); };
+  const navigate = (target: Section) => { setSection(target); if (window.location.hash !== `#${target}`) window.location.hash = target; if (target === 'logs' || target === 'troubleshooting') setSelectedId(selected?.id ?? apps[0]?.id ?? ''); };
   const applySettings = async (draft: Omit<DaemonSettings, 'version' | 'stateDirectory'>) => { setSettingsBusy(true); try { const next = await api<DaemonSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(draft) }); setSettings(next); Toast.success(`设置已安全应用为版本 ${next.version}。`); await refresh(); } catch (error) { Toast.error(errorMessage(error)); } finally { setSettingsBusy(false); } };
 
   renderedLocale = locale;
