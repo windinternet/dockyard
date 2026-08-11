@@ -16,7 +16,25 @@ export class ApplicationsController {
   @Patch(':id/policies') policies(@Param('id') id: string, @Body() body: unknown) { const value = record(body); const restartPolicy = parseRestartPolicy(value?.restartPolicy); const logPolicy = parseLogPolicy(value?.logPolicy); if (!restartPolicy || !logPolicy) throw new BadRequestException('重启或日志策略无效。'); return publicApplication(this.runtime.updatePolicies(id, restartPolicy, logPolicy)); }
   @Patch(':id/command') command(@Param('id') id: string, @Body() body: unknown) { const value = record(body); if (!value || typeof value.selectedCommand !== 'string') throw new BadRequestException('启动命令无效。'); return publicApplication(this.runtime.updateCommand(id, value.selectedCommand)); }
   @Post(':id/diagnostics') diagnostics(@Param('id') id: string) { return this.runtime.diagnostics(id); }
-  @Sse(':id/logs/tail') tail(@Param('id') id: string, @Query('stream') stream = 'stdout'): Observable<MessageEvent> { this.runtime.application(id); if (stream !== 'stdout' && stream !== 'stderr') throw new BadRequestException('stream 必须是 stdout 或 stderr。'); return new Observable((subscriber) => { const remove = this.runtime.onLog((message: LogMessage) => { if (message.applicationId === id && message.stream === stream) subscriber.next({ data: message } as MessageEvent); }); return remove; }); }
+  @Sse(':id/logs/tail') tail(@Param('id') id: string, @Query('stream') stream = 'stdout'): Observable<MessageEvent> {
+    this.runtime.application(id);
+    if (stream !== 'stdout' && stream !== 'stderr') throw new BadRequestException('stream 必须是 stdout 或 stderr。');
+    return new Observable((subscriber) => {
+      let replaying = true;
+      const pending: LogMessage[] = [];
+      const publish = (message: LogMessage) => subscriber.next({ data: message } as MessageEvent);
+      const remove = this.runtime.onLog((message) => {
+        if (message.applicationId !== id || message.stream !== stream) return;
+        if (replaying) pending.push(message); else publish(message);
+      });
+      void this.runtime.logTail(id, stream).then((history) => {
+        for (const message of history) publish(message);
+        replaying = false;
+        for (const message of pending) publish(message);
+      }).catch((error: unknown) => subscriber.error(error));
+      return remove;
+    });
+  }
 }
 function publicApplication(application: Application): Application { return { ...application, command: redactCommandForDisplay(application.command) }; }
 export function runtimeEvent(update: RuntimeUpdate): MessageEvent { return update.type === 'application' ? { type: 'application', data: publicApplication(update.application) } as unknown as MessageEvent : update.type === 'metric' ? { type: 'metric', data: update.metric } as unknown as MessageEvent : { type: 'project', data: update.project } as unknown as MessageEvent; }

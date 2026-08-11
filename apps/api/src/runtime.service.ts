@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, OnApplicationBootstrap, OnModuleDestroy, RequestTimeoutException } from '@nestjs/common';
 import { appendFileSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
-import { mkdir, readlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readlink, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
@@ -19,10 +19,13 @@ interface Runtime {
   retries: number;
   manuallyStopped: boolean;
   listeningPorts: readonly number[];
+  externalLogs?: Partial<Record<LogStream, ExternalLogCursor>>;
+  logBuffers: Partial<Record<LogStream, string>>;
 }
 
 export interface HostProcess { pid: number; ppid: number; startedAt: number; command: string; cwd?: string; }
 export interface ObservedProcess { pid: number; startedAt: number; listeningPorts: readonly number[]; }
+interface ExternalLogCursor { path: string; position: number; }
 interface RestartRequest { application: Application; retries: number; }
 interface ProjectRuntime { child: ChildProcess; project: Project; status: ApplicationStatus; startedAt: number; retries: number; manuallyStopped: boolean; }
 export interface LogMessage { applicationId: string; stream: LogStream; at: string; line: string; }
@@ -30,6 +33,7 @@ export type RuntimeUpdate = { type: 'application'; application: Application } | 
 
 const execFileAsync = promisify(execFile);
 const nodeRelatedCommand = /\b(?:node(?:js)?|npm|pnpm|yarn|bun|vite|next|webpack|ts-node|tsx|deno)\b/iu;
+const maxLogReadBytes = 64 * 1_024;
 
 @Injectable()
 export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -98,16 +102,20 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
 
   reloadRunningPolicies(): void { for (const [id, runtime] of this.runtimes) { const current = this.database.db.getApplication(id); if (current) runtime.application = current; } }
   onLog(listener: (message: LogMessage) => void): () => void { this.logs.on('line', listener); return () => this.logs.off('line', listener); }
+  async logTail(id: string, stream: LogStream): Promise<LogMessage[]> {
+    const application = this.application(id);
+    return (await readLogTail(`${this.database.db.pathResolver.logDirectory(application.projectId, application.id)}/${stream}.log`)).map((line) => ({ applicationId: id, stream, at: new Date().toISOString(), line: redactDisplayText(line) }));
+  }
   onUpdate(listener: (update: RuntimeUpdate) => void): () => void { this.updates.on('update', listener); return () => this.updates.off('update', listener); }
 
   private launch(application: Application, retries: number): void {
     const child = spawn(application.command.executable, [...application.command.args], { cwd: application.cwd, shell: false, stdio: ['ignore', 'pipe', 'pipe'], env: inheritedEnvironment() });
-    const runtime: Runtime = { child, pid: child.pid ?? null, ownership: 'dockyard', application, status: 'running', startedAt: Date.now(), retries, manuallyStopped: false, listeningPorts: [] };
+    const runtime: Runtime = { child, pid: child.pid ?? null, ownership: 'dockyard', application, status: 'running', startedAt: Date.now(), retries, manuallyStopped: false, listeningPorts: [], logBuffers: {} };
     this.runtimes.set(application.id, runtime);
     this.emitApplication(application.id);
     const logDirectory = this.database.db.pathResolver.logDirectory(application.projectId, application.id); mkdirSync(logDirectory, { recursive: true });
-    if (child.stdout) this.pipeLogs(application.id, 'stdout', child.stdout, logDirectory, () => runtime.application.logPolicy);
-    if (child.stderr) this.pipeLogs(application.id, 'stderr', child.stderr, logDirectory, () => runtime.application.logPolicy);
+    if (child.stdout) this.pipeLogs(runtime, 'stdout', child.stdout, logDirectory);
+    if (child.stderr) this.pipeLogs(runtime, 'stderr', child.stderr, logDirectory);
     this.database.db.recordEvent({ applicationId: application.id, type: 'started', detail: { command: redactCommandForDisplay(application.command), cwd: application.cwd, pid: child.pid, source: 'dockyard' } });
     child.once('error', (error) => this.finish(application.id, runtime, null, null, error.message));
     child.once('exit', (code, signal) => this.finish(application.id, runtime, code, signal, undefined));
@@ -181,7 +189,21 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     return this.application(id);
   }
 
-  private pipeLogs(applicationId: string, stream: LogStream, source: NodeJS.ReadableStream, directory: string, policy: () => Application['logPolicy']): void { let buffered = ''; source.on('data', (data: Buffer) => { appendRotatedLog(directory, stream, data, policy()); buffered += data.toString('utf8'); const lines = buffered.split(/\r?\n/); buffered = lines.pop() ?? ''; for (const line of lines) this.logs.emit('line', { applicationId, stream, at: new Date().toISOString(), line: redactDisplayText(line) }); }); source.on('end', () => { if (buffered) this.logs.emit('line', { applicationId, stream, at: new Date().toISOString(), line: redactDisplayText(buffered) }); }); }
+  private pipeLogs(runtime: Runtime, stream: LogStream, source: NodeJS.ReadableStream, directory: string): void {
+    source.on('data', (data: Buffer) => this.recordLogData(runtime, stream, data, directory));
+    source.on('end', () => this.flushLogBuffer(runtime, stream));
+  }
+  private recordLogData(runtime: Runtime, stream: LogStream, data: Buffer, directory: string): void {
+    appendRotatedLog(directory, stream, data, runtime.application.logPolicy);
+    const lines = `${runtime.logBuffers[stream] ?? ''}${data.toString('utf8')}`.split(/\r?\n/);
+    runtime.logBuffers[stream] = lines.pop() ?? '';
+    for (const line of lines) this.logs.emit('line', { applicationId: runtime.application.id, stream, at: new Date().toISOString(), line: redactDisplayText(line) });
+  }
+  private flushLogBuffer(runtime: Runtime, stream: LogStream): void {
+    const line = runtime.logBuffers[stream];
+    if (line) this.logs.emit('line', { applicationId: runtime.application.id, stream, at: new Date().toISOString(), line: redactDisplayText(line) });
+    delete runtime.logBuffers[stream];
+  }
 
   private finish(applicationId: string, runtime: Runtime, code: number | null, signal: NodeJS.Signals | null, error: string | undefined): void {
     if (this.runtimes.get(applicationId) !== runtime) return;
@@ -269,19 +291,22 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
           }
           continue;
         }
-        if (observed) this.adoptExternalRuntime(application, runtime, observed);
+        if (observed) await this.adoptExternalRuntime(application, runtime, observed);
         else if (runtime?.ownership === 'external') this.finish(application.id, runtime, null, null, '外部进程已从本机进程表消失。');
       }
     } finally { this.discovering = false; }
   }
 
-  private adoptExternalRuntime(application: Application, runtime: Runtime | undefined, observed: ObservedProcess): void {
+  private async adoptExternalRuntime(application: Application, runtime: Runtime | undefined, observed: ObservedProcess): Promise<void> {
     if (!runtime) {
       this.cancelRetry(application.id);
-      const adopted: Runtime = { pid: observed.pid, ownership: 'external', application, status: 'running', startedAt: observed.startedAt, retries: 0, manuallyStopped: false, listeningPorts: observed.listeningPorts };
+      const adopted: Runtime = { pid: observed.pid, ownership: 'external', application, status: 'running', startedAt: observed.startedAt, retries: 0, manuallyStopped: false, listeningPorts: observed.listeningPorts, logBuffers: {}, externalLogs: await externalLogCursors(observed.pid) };
       this.runtimes.set(application.id, adopted);
       this.terminalStatuses.delete(application.id);
       this.database.db.recordEvent({ applicationId: application.id, type: 'started', detail: { pid: observed.pid, listeningPorts: observed.listeningPorts, source: 'external-discovery' } });
+      const streams = Object.keys(adopted.externalLogs ?? {}) as LogStream[];
+      this.database.db.recordEvent({ applicationId: application.id, type: streams.length ? 'external-log-following' : 'external-log-unavailable', detail: streams.length ? { streams, source: 'file-descriptor' } : { reason: 'stdout-stderr-not-file-backed' } });
+      await this.collectExternalLogs(adopted);
       this.emitApplication(application.id);
       return;
     }
@@ -291,7 +316,21 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     runtime.startedAt = observed.startedAt;
     runtime.listeningPorts = observed.listeningPorts;
     runtime.status = 'running';
+    if (changed) runtime.externalLogs = await externalLogCursors(observed.pid);
+    await this.collectExternalLogs(runtime);
     if (changed) this.emitApplication(application.id);
+  }
+
+  private async collectExternalLogs(runtime: Runtime): Promise<void> {
+    if (runtime.ownership !== 'external' || !runtime.externalLogs) return;
+    const directory = this.database.db.pathResolver.logDirectory(runtime.application.projectId, runtime.application.id);
+    mkdirSync(directory, { recursive: true });
+    await Promise.all((Object.entries(runtime.externalLogs) as Array<[LogStream, ExternalLogCursor]>).map(async ([stream, cursor]) => {
+      const next = await readLogChunk(cursor.path, cursor.position);
+      if (!next) return;
+      cursor.position = next.position;
+      if (next.data.length) this.recordLogData(runtime, stream, next.data, directory);
+    }));
   }
 
   private async sampleRuntime(applicationId: string, runtime: Runtime): Promise<void> {
@@ -332,6 +371,24 @@ export function selectObservedProcess(processes: readonly HostProcess[], ports: 
   return { pid: ordered[0]!.pid, startedAt: ordered[0]!.startedAt, listeningPorts };
 }
 
+/** Only regular local files are safe to tail after an independently-owned process has started. */
+export function externalLogFilesFromDescriptors(descriptors: Partial<Record<1 | 2, string>>): Partial<Record<LogStream, string>> {
+  const result: Partial<Record<LogStream, string>> = {};
+  if (isRegularLogFile(descriptors[1])) result.stdout = descriptors[1]!;
+  if (isRegularLogFile(descriptors[2])) result.stderr = descriptors[2]!;
+  return result;
+}
+
+/** Reads the recent persisted tail so reconnecting SSE clients immediately receive useful context. */
+export async function readLogTail(path: string): Promise<string[]> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile()) return [];
+    const chunk = await readLogChunk(path, Math.max(0, info.size - maxLogReadBytes));
+    return chunk ? splitLogLines(chunk.data.toString('utf8')) : [];
+  } catch { return []; }
+}
+
 /** PID reuse is possible, so a destructive operation requires both PID and process start time to still match. */
 export function sameProcessIdentity(pid: number, startedAt: number, process: Pick<HostProcess, 'pid' | 'startedAt'>): boolean { return pid === process.pid && Math.abs(startedAt - process.startedAt) < 2_000; }
 
@@ -367,6 +424,65 @@ async function processCwds(pids: readonly number[]): Promise<{ available: boolea
     }
     return { available: true, cwds };
   } catch { return { available: false, cwds: new Map() }; }
+}
+
+async function externalLogCursors(pid: number): Promise<Partial<Record<LogStream, ExternalLogCursor>>> {
+  const files = externalLogFilesFromDescriptors(await standardStreamDescriptors(pid));
+  const entries = await Promise.all((Object.entries(files) as Array<[LogStream, string]>).map(async ([stream, path]) => {
+    try {
+      const info = await stat(path);
+      return [stream, { path, position: Math.max(0, info.size - maxLogReadBytes) }] as const;
+    } catch { return null; }
+  }));
+  return Object.fromEntries(entries.filter((entry): entry is readonly [LogStream, ExternalLogCursor] => entry !== null));
+}
+
+async function standardStreamDescriptors(pid: number): Promise<Partial<Record<1 | 2, string>>> {
+  if (platform() === 'linux') {
+    const entries = await Promise.all(([1, 2] as const).map(async (descriptor) => {
+      try { return [descriptor, await readlink(`/proc/${pid}/fd/${descriptor}`)] as const; } catch { return null; }
+    }));
+    return Object.fromEntries(entries.filter((entry): entry is readonly [1 | 2, string] => entry !== null));
+  }
+  if (platform() !== 'darwin') return {};
+  try {
+    const { stdout } = await execFileAsync('lsof', ['-n', '-a', '-p', String(pid), '-d', '1,2', '-Ffn'], { timeout: 1_000, maxBuffer: 64 * 1_024 });
+    let descriptor: 1 | 2 | undefined;
+    const result: Partial<Record<1 | 2, string>> = {};
+    for (const line of stdout.split(/\r?\n/u)) {
+      if (line === 'f1') descriptor = 1;
+      else if (line === 'f2') descriptor = 2;
+      else if (descriptor && line.startsWith('n')) result[descriptor] = line.slice(1);
+    }
+    return result;
+  } catch { return {}; }
+}
+
+async function readLogChunk(path: string, position: number): Promise<{ data: Buffer; position: number } | null> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile()) return null;
+    const start = info.size < position ? 0 : position;
+    const length = Math.min(maxLogReadBytes, Math.max(0, info.size - start));
+    if (!length) return { data: Buffer.alloc(0), position: start };
+    const handle = await open(path, 'r');
+    try {
+      const data = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(data, 0, length, start);
+      return { data: data.subarray(0, bytesRead), position: start + bytesRead };
+    } finally { await handle.close(); }
+  } catch { return null; }
+}
+
+function isRegularLogFile(path: string | undefined): path is string {
+  if (!path || !path.startsWith('/')) return false;
+  try { return statSync(path).isFile(); } catch { return false; }
+}
+
+function splitLogLines(text: string): string[] {
+  const lines = text.split(/\r?\n/u);
+  if (lines.at(-1) === '') lines.pop();
+  return lines;
 }
 
 async function listeningPortsByPid(pids: readonly number[]): Promise<Map<number, readonly number[]>> {

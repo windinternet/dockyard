@@ -92,7 +92,7 @@ export interface Application {
 export interface LifecycleEvent {
   id: string;
   applicationId: string;
-  type: 'started' | 'stopped' | 'exited' | 'restart-scheduled' | 'crashed' | 'diagnostics-exported';
+  type: 'started' | 'stopped' | 'exited' | 'restart-scheduled' | 'crashed' | 'diagnostics-exported' | 'external-log-following' | 'external-log-unavailable';
   occurredAt: string;
   detail: Record<string, unknown>;
 }

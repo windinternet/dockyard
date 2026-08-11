@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { appendFile, mkdtemp } from 'node:fs/promises';
+import { closeSync, openSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -7,7 +9,7 @@ import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanPro
 import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { ProjectService } from '../apps/api/dist/project.service.js';
-import { matchingProcesses, parseProcessTable, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
+import { externalLogFilesFromDescriptors, matchingProcesses, parseProcessTable, readLogTail, RuntimeService, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
 import { runtimeEvent } from '../apps/api/dist/applications.controller.js';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -135,6 +137,50 @@ test('external process discovery matches an imported application by cwd and pref
   assert.equal(observed?.pid, 102, 'the actual listening child is the metric and PID target');
   assert.equal(sameProcessIdentity(102, now - 3_723_000, processes[1]), true);
   assert.equal(sameProcessIdentity(102, now - 3_700_000, processes[1]), false);
+});
+
+test('logs tail replays persisted output and external file-backed stdout/stderr can be collected', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-log-tail-test-'));
+  const stdout = join(state, 'external.stdout.log');
+  const stderr = join(state, 'external.stderr.log');
+  await Promise.all([
+    import('node:fs/promises').then(({ writeFile }) => writeFile(stdout, 'booted\nready\n')),
+    import('node:fs/promises').then(({ writeFile }) => writeFile(stderr, 'warning\n')),
+  ]);
+  assert.deepEqual(await readLogTail(stdout), ['booted', 'ready']);
+  assert.deepEqual(externalLogFilesFromDescriptors({ 1: stdout, 2: stderr }), { stdout, stderr });
+  assert.deepEqual(externalLogFilesFromDescriptors({ 1: '/dev/ttys001', 2: 'pipe' }), {});
+});
+
+test('runtime follows file-backed logs from an externally started process', { skip: process.platform === 'win32' }, async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-external-runtime-test-'));
+  const database = await DockyardDatabase.open(new PathResolver(join(state, 'dockyard-state')));
+  const preview = await scanProject(fixture, false);
+  const imported = database.importProject(state, 'external-runtime', [{ ...preview.applications[0], cwd: state }]);
+  const application = imported.applications[0];
+  assert.ok(application);
+  const stdoutPath = join(state, 'external.stdout.log');
+  const stderrPath = join(state, 'external.stderr.log');
+  const stdout = openSync(stdoutPath, 'a');
+  const stderr = openSync(stderrPath, 'a');
+  const child = spawn(process.execPath, ['-e', "console.log('external-ready'); console.error('external-warning'); setInterval(() => {}, 1_000)"], { cwd: state, stdio: ['ignore', stdout, stderr] });
+  closeSync(stdout); closeSync(stderr);
+  assert.ok(child.pid);
+  const runtime = new RuntimeService({ db: database });
+  const messages = [];
+  const remove = runtime.onLog((message) => messages.push(message));
+  try {
+    await runtime.adoptExternalRuntime(application, undefined, { pid: child.pid, startedAt: Date.now(), listeningPorts: [] });
+    await appendFile(stdoutPath, 'external-next\n');
+    await runtime.collectExternalLogs(runtime.runtimes.get(application.id));
+    assert.deepEqual(messages.map((message) => [message.stream, message.line]).sort(), [['stderr', 'external-warning'], ['stdout', 'external-next'], ['stdout', 'external-ready']]);
+    assert.deepEqual((await runtime.logTail(application.id, 'stdout')).map((message) => message.line), ['external-ready', 'external-next']);
+  } finally {
+    remove();
+    child.kill('SIGTERM');
+    runtime.onModuleDestroy();
+    database.close();
+  }
 });
 
 test('database upgrades the legacy local schema while preserving project and application configuration', async () => {
