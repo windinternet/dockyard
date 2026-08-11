@@ -109,6 +109,7 @@ test('external process discovery matches an imported application by cwd and pref
   const observed = selectObservedProcess(matches, new Map([[101, []], [102, [4318, 5173]]]));
   assert.deepEqual(matches.map((process) => process.pid), [101, 102]);
   assert.deepEqual(observed, { pid: 102, startedAt: now - 3_723_000, listeningPorts: [4318, 5173] });
+  assert.equal(observed?.pid, 102, 'the actual listening child is the metric and PID target');
   assert.equal(sameProcessIdentity(102, now - 3_723_000, processes[1]), true);
   assert.equal(sameProcessIdentity(102, now - 3_700_000, processes[1]), false);
 });

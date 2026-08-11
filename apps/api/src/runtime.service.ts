@@ -194,7 +194,14 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
         const observed = selectObservedProcess(matches.get(application.id) ?? [], ports);
         if (runtime?.ownership === 'dockyard') {
           const nextPorts = observed?.listeningPorts ?? [];
-          if (!samePorts(runtime.listeningPorts, nextPorts)) { runtime.listeningPorts = nextPorts; this.emitApplication(application.id); }
+          const nextPid = observed?.pid ?? runtime.child?.pid ?? runtime.pid;
+          const nextStartedAt = observed?.startedAt ?? runtime.startedAt;
+          if (runtime.pid !== nextPid || runtime.startedAt !== nextStartedAt || !samePorts(runtime.listeningPorts, nextPorts)) {
+            runtime.pid = nextPid;
+            runtime.startedAt = nextStartedAt;
+            runtime.listeningPorts = nextPorts;
+            this.emitApplication(application.id);
+          }
           continue;
         }
         if (observed) this.adoptExternalRuntime(application, runtime, observed);

@@ -154,9 +154,11 @@ function ProjectApplicationTable({ apps, metrics, onAction, onCommand }: { apps:
     { title: '内存', key: 'memory', width: 180, render: (_: unknown, application: Application) => <MetricTrend samples={metrics[application.id] ?? []} kind="memory" /> },
     { title: '实际命令', dataIndex: 'command', width: 160, render: (_: Command, application: Application) => <code>{commandText(application.command)}</code> },
     { title: 'PID', dataIndex: 'pid', width: 76, render: (_: number | null, application: Application) => application.pid ?? '—' },
+    { title: '来源', dataIndex: 'runtimeOwnership', width: 104, render: (_: Application['runtimeOwnership'], application: Application) => runtimeSource(application.runtimeOwnership) },
+    { title: '监听端口', dataIndex: 'listeningPorts', width: 110, render: (_: number[], application: Application) => application.listeningPorts.length ? application.listeningPorts.join(', ') : '—' },
     { title: '', key: 'actions', width: 270, fixed: 'right' as const, render: (_: unknown, application: Application) => <ApplicationActions app={application} onAction={onAction} /> }
   ];
-  return <Table<Application> className="project-module-table" columns={columns} dataSource={apps} rowKey="id" pagination={false} size="small" scroll={{ x: 1324, y: 360 }} />;
+  return <Table<Application> className="project-module-table" columns={columns} dataSource={apps} rowKey="id" pagination={false} size="small" scroll={{ x: 1538, y: 360 }} />;
 }
 
 function MetricTrend({ samples, kind }: { samples: Metric[]; kind: 'cpu' | 'memory' }): ReactElement {
