@@ -40,7 +40,7 @@ test('combined log tail replays and follows stdout and stderr through one subscr
   const controller = new ApplicationsController({
     application: () => ({}),
     onLog: (listener) => { emit = listener; return () => undefined; },
-    logTail: async (_id, stream) => [{ applicationId: 'app-1', stream, at: stream === 'stdout' ? '2026-08-11T00:00:00.000Z' : '2026-08-11T00:00:01.000Z', line: `${stream}-history` }],
+    logHistory: async (_id, stream) => ({ logs: stream === 'combined' ? [{ applicationId: 'app-1', stream: 'stdout', at: '2026-08-11T00:00:00.000Z', line: 'stdout-history' }, { applicationId: 'app-1', stream: 'stderr', at: '2026-08-11T00:00:01.000Z', line: 'stderr-history' }] : [{ applicationId: 'app-1', stream, at: '2026-08-11T00:00:00.000Z', line: `${stream}-history` }], hasMore: false }),
   });
   const messages = [];
   const subscription = controller.tail('app-1', 'combined').subscribe((event) => messages.push(event.data));
@@ -212,6 +212,12 @@ test('runtime follows file-backed logs from an externally started process', { sk
     assert.deepEqual(messages.map((message) => [message.stream, message.line]).sort(), [['stderr', 'external-warning'], ['stdout', 'external-next'], ['stdout', 'external-ready']]);
     const tail = await runtime.logTail(application.id, 'stdout');
     assert.deepEqual(tail.map((message) => message.line), ['external-ready', 'external-next']);
+    const history = await runtime.logHistory(application.id, 'combined');
+    assert.deepEqual(history.logs.map((message) => [message.stream, message.line]).sort(), [['stderr', 'external-warning'], ['stdout', 'external-next'], ['stdout', 'external-ready']]);
+    assert.equal(history.logs.every((message) => Number.isFinite(Date.parse(message.at))), true);
+    const recent = await runtime.logHistory(application.id, 'combined', 2);
+    const older = await runtime.logHistory(application.id, 'combined', 2, recent.logs[0]?.cursor);
+    assert.deepEqual([...recent.logs, ...older.logs].map((message) => message.line).sort(), ['external-next', 'external-ready', 'external-warning']);
     assert.equal(tail[0]?.at, (await import('node:fs/promises').then(({ stat }) => stat(join(state, 'dockyard-state', 'logs', imported.project.id, application.id, 'stdout.log')))).mtime.toISOString());
   } finally {
     remove();

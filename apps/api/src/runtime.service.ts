@@ -1,8 +1,9 @@
 import { Injectable, NotFoundException, OnApplicationBootstrap, OnModuleDestroy, RequestTimeoutException } from '@nestjs/common';
 import { appendFileSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
-import { mkdir, open, readlink, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readlink, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { platform } from 'node:os';
 import { promisify } from 'node:util';
@@ -30,7 +31,9 @@ export interface ObservedProcess { pid: number; startedAt: number; listeningPort
 interface ExternalLogCursor { path: string; position: number; }
 interface RestartRequest { application: Application; retries: number; }
 interface ProjectRuntime { child: ChildProcess; project: Project; status: ApplicationStatus; startedAt: number; retries: number; manuallyStopped: boolean; }
-export interface LogMessage { applicationId: string; stream: LogStream; at: string; line: string; }
+export interface LogMessage { applicationId: string; stream: LogStream; at: string; line: string; cursor?: string; }
+export interface LogHistory { logs: LogMessage[]; hasMore: boolean; }
+interface LogJournalEntry { id: string; stream: LogStream; at: string; line: string; }
 export type RuntimeUpdate = { type: 'application'; application: Application } | { type: 'metric'; metric: MetricRollup } | { type: 'project'; project: Project };
 
 const execFileAsync = promisify(execFile);
@@ -56,6 +59,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   private metricRetentionDays = 7;
   private sampler: ReturnType<typeof setInterval>;
   private discovering = false;
+  private lastLogPruneAt = 0;
 
   constructor(private readonly database: DatabaseService) { this.sampler = this.createSampler(1_000); }
 
@@ -130,7 +134,24 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     const path = `${this.database.db.pathResolver.logDirectory(application.projectId, application.id)}/${stream}.log`;
     const [lines, info] = await Promise.all([readLogTail(path), stat(path).catch(() => null)]);
     const at = info?.isFile() ? info.mtime.toISOString() : new Date(0).toISOString();
-    return lines.map((line) => ({ applicationId: id, stream, at, line: redactDisplayText(line) }));
+    return lines.map((line, index) => ({ applicationId: id, stream, at, line: redactDisplayText(line), cursor: encodeLogCursor(at, `${stream}-${index}`) }));
+  }
+  async logHistory(id: string, stream: LogStream | 'combined', limit = 500, before?: string): Promise<LogHistory> {
+    const application = this.application(id);
+    const normalizedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1_000);
+    const directory = this.database.db.pathResolver.logDirectory(application.projectId, application.id);
+    const cutoff = before ? parseLogCursor(before) : null;
+    if (before && !cutoff) throw new RequestTimeoutException('日志历史游标无效。');
+    const journal = await readLogJournal(directory);
+    // Flat archive files predate the structured journal. Keep them in the history after newer journal entries begin arriving.
+    const entries = [...await readLegacyLogEntries(directory, journal.length === 0), ...journal]
+      .filter((entry) => (stream === 'combined' || entry.stream === stream) && (!cutoff || compareLogCursor(entry, cutoff) < 0))
+      .sort(compareLogCursor);
+    if (entries.length) {
+      const logs = entries.slice(-normalizedLimit).map((entry) => ({ applicationId: id, stream: entry.stream, at: entry.at, line: redactDisplayText(entry.line), cursor: encodeLogCursor(entry.at, entry.id) }));
+      return { logs, hasMore: entries.length > logs.length };
+    }
+    return { logs: [], hasMore: false };
   }
   onUpdate(listener: (update: RuntimeUpdate) => void): () => void { this.updates.on('update', listener); return () => this.updates.off('update', listener); }
 
@@ -230,12 +251,17 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     appendRotatedLog(directory, stream, data, runtime.application.logPolicy);
     const lines = `${runtime.logBuffers[stream] ?? ''}${data.toString('utf8')}`.split(/\r?\n/);
     runtime.logBuffers[stream] = lines.pop() ?? '';
-    for (const line of lines) this.logs.emit('line', { applicationId: runtime.application.id, stream, at: new Date().toISOString(), line: redactDisplayText(line) });
+    for (const line of lines) this.recordLogLine(runtime, stream, line, directory);
   }
   private flushLogBuffer(runtime: Runtime, stream: LogStream): void {
     const line = runtime.logBuffers[stream];
-    if (line) this.logs.emit('line', { applicationId: runtime.application.id, stream, at: new Date().toISOString(), line: redactDisplayText(line) });
+    if (line) this.recordLogLine(runtime, stream, line, this.database.db.pathResolver.logDirectory(runtime.application.projectId, runtime.application.id));
     delete runtime.logBuffers[stream];
+  }
+  private recordLogLine(runtime: Runtime, stream: LogStream, line: string, directory: string): void {
+    const entry = { id: randomUUID(), stream, at: new Date().toISOString(), line } satisfies LogJournalEntry;
+    appendLogJournalEntry(directory, entry, runtime.application.logPolicy);
+    this.logs.emit('line', { applicationId: runtime.application.id, stream, at: entry.at, line: redactDisplayText(line), cursor: encodeLogCursor(entry.at, entry.id) } satisfies LogMessage);
   }
 
   private finish(applicationId: string, runtime: Runtime, code: number | null, signal: NodeJS.Signals | null, error: string | undefined): void {
@@ -297,7 +323,19 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   private project(id: string) { const project = this.database.db.listProjects().find((item) => item.id === id); if (!project) throw new NotFoundException('项目不存在。'); return this.withProjectRuntime(project); }
   private entrypointFor(project: Project) { return project.settings.selectedProjectEntrypoint === null ? null : project.settings.projectEntrypointOptions.find((option) => option.name === project.settings.selectedProjectEntrypoint) ?? null; }
   private shouldUseProjectEntrypoint(project: Project): boolean { const hasEntrypoint = this.entrypointFor(project) !== null; if (project.settings.startupPreference === 'project-first') { if (!hasEntrypoint) throw new RequestTimeoutException('项目优先模式需要先在项目设置中选择项目级启动入口。'); return true; } return project.settings.startupPreference === 'automatic' && hasEntrypoint; }
-  private sample(): void { void this.reconcileExternalRuntimes(); for (const [applicationId, runtime] of this.runtimes) void this.sampleRuntime(applicationId, runtime); }
+  private sample(): void {
+    void this.reconcileExternalRuntimes();
+    for (const [applicationId, runtime] of this.runtimes) void this.sampleRuntime(applicationId, runtime);
+    if (Date.now() - this.lastLogPruneAt >= 60 * 60 * 1_000) { this.lastLogPruneAt = Date.now(); this.pruneLogArchives(); }
+  }
+  private pruneLogArchives(): void {
+    for (const application of this.database.db.listApplications()) {
+      const directory = this.database.db.pathResolver.logDirectory(application.projectId, application.id);
+      pruneExpiredActiveLogs(directory, application.logPolicy);
+      pruneArchives(`${directory}/archive`, application.logPolicy);
+      for (const channel of ['stdout', 'stderr', 'combined']) pruneArchives(`${directory}/archive/${channel}`, application.logPolicy);
+    }
+  }
   private createSampler(intervalMs: number): ReturnType<typeof setInterval> { const sampler = setInterval(() => this.sample(), intervalMs); sampler.unref(); return sampler; }
 
   private async reconcileExternalRuntimes(): Promise<void> {
@@ -574,6 +612,94 @@ async function waitFor<T>(promise: Promise<T>, timeoutMs: number, message: strin
   } finally { if (timer) clearTimeout(timer); }
 }
 async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { try { process.kill(pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw new RequestTimeoutException('外部进程无法确认已退出。'); } await new Promise((done) => setTimeout(done, 100)); } throw new RequestTimeoutException('应用未在 5 秒内优雅退出。它仍在运行，未执行强制终止；请检查日志和进程状态。'); }
-function appendRotatedLog(directory: string, stream: LogStream, data: Buffer, policy: Application['logPolicy']): void { const path = `${directory}/${stream}.log`; if (existsAndExceeds(path, data.length, policy.maxBytesPerFile)) { const archive = `${directory}/archive`; mkdirSync(archive, { recursive: true }); renameSync(path, `${archive}/${stream}-${Date.now()}.log`); pruneArchives(archive, policy); } appendFileSync(path, data); }
+function appendRotatedLog(directory: string, stream: LogStream, data: Buffer, policy: Application['logPolicy']): void { appendRotatedFile(directory, stream, 'log', data, policy); }
+function appendLogJournalEntry(directory: string, entry: LogJournalEntry, policy: Application['logPolicy']): void { appendRotatedFile(directory, 'combined', 'ndjson', Buffer.from(`${JSON.stringify(entry)}\n`, 'utf8'), policy); }
+function appendRotatedFile(directory: string, channel: 'stdout' | 'stderr' | 'combined', extension: 'log' | 'ndjson', data: Buffer, policy: Application['logPolicy']): void {
+  const path = `${directory}/${channel}.${extension}`;
+  if (existsAndExceeds(path, data.length, policy.maxBytesPerFile)) {
+    const archive = `${directory}/archive/${channel}`;
+    mkdirSync(archive, { recursive: true });
+    renameSync(path, `${archive}/${Date.now()}.${extension}`);
+    pruneArchives(archive, policy);
+  }
+  appendFileSync(path, data);
+}
 function existsAndExceeds(path: string, incoming: number, limit: number): boolean { try { return statSync(path).size + incoming > limit; } catch { return false; } }
-function pruneArchives(directory: string, policy: Application['logPolicy']): void { const cutoff = Date.now() - policy.retentionDays * 86_400_000; const files = readdirSync(directory).map((name) => ({ name, path: `${directory}/${name}`, stat: statSync(`${directory}/${name}`) })).sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs); for (const file of files.slice(policy.maxFiles)) unlinkSync(file.path); for (const file of files) if (file.stat.mtimeMs < cutoff) { try { unlinkSync(file.path); } catch {} } }
+function pruneArchives(directory: string, policy: Application['logPolicy']): void {
+  try {
+    const cutoff = Date.now() - policy.retentionDays * 86_400_000;
+    const files = readdirSync(directory).flatMap((name) => { try { const path = `${directory}/${name}`; const info = statSync(path); return info.isFile() ? [{ path, stat: info }] : []; } catch { return []; } }).sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+    for (const file of files.slice(policy.maxFiles)) { try { unlinkSync(file.path); } catch {} }
+    for (const file of files) if (file.stat.mtimeMs < cutoff) { try { unlinkSync(file.path); } catch {} }
+  } catch { /* An absent archive directory needs no pruning. */ }
+}
+function pruneExpiredActiveLogs(directory: string, policy: Application['logPolicy']): void {
+  const cutoff = Date.now() - policy.retentionDays * 86_400_000;
+  for (const name of ['stdout.log', 'stderr.log', 'combined.ndjson']) {
+    const path = `${directory}/${name}`;
+    try { if (statSync(path).isFile() && statSync(path).mtimeMs < cutoff) unlinkSync(path); } catch { /* The next write recreates a pruned active log. */ }
+  }
+}
+async function readLogJournal(directory: string): Promise<LogJournalEntry[]> {
+  const active = `${directory}/combined.ndjson`;
+  const archive = `${directory}/archive/combined`;
+  const archivePaths: Array<{ path: string; modifiedAt: number }> = [];
+  for (const name of await readdir(archive).catch(() => [])) {
+    if (!name.endsWith('.ndjson')) continue;
+    const path = `${archive}/${name}`;
+    const info = await stat(path).catch(() => null);
+    if (info?.isFile()) archivePaths.push({ path, modifiedAt: info.mtimeMs });
+  }
+  // Start at the active journal so reconnects never lose the newest records when retention allows many archives.
+  const paths = [active, ...archivePaths.sort((left, right) => right.modifiedAt - left.modifiedAt).map((item) => item.path)];
+  const entries: LogJournalEntry[] = [];
+  for (const path of paths) {
+    const info = await stat(path).catch(() => null);
+    if (!info?.isFile()) continue;
+    const text = await readTextTail(path, info.size);
+    for (const [index, raw] of text.split(/\r?\n/u).entries()) {
+      try {
+        const entry = JSON.parse(raw) as { id?: unknown; at?: unknown; stream?: unknown; line?: unknown };
+        if (typeof entry.at === 'string' && (entry.stream === 'stdout' || entry.stream === 'stderr') && typeof entry.line === 'string') entries.push({ id: typeof entry.id === 'string' ? entry.id : `${path}:${index}`, at: entry.at, stream: entry.stream, line: entry.line });
+      } catch { /* A partial/corrupt journal line is not trusted for display. */ }
+    }
+  }
+  return entries.sort(compareLogCursor);
+}
+async function readLegacyLogEntries(directory: string, includeActive: boolean): Promise<LogJournalEntry[]> {
+  const archive = `${directory}/archive`;
+  const archived = (await readdir(archive).catch(() => []))
+    .filter((name) => /^(stdout|stderr)-\d+\.log$/u.test(name))
+    .map((name) => `${archive}/${name}`);
+  const active = includeActive ? ['stdout.log', 'stderr.log'].map((name) => `${directory}/${name}`) : [];
+  const entries: LogJournalEntry[] = [];
+  for (const path of [...archived, ...active]) {
+    const info = await stat(path).catch(() => null);
+    if (!info?.isFile()) continue;
+    const at = info.mtime.toISOString();
+    const stream = path.includes('/stdout') ? 'stdout' : 'stderr';
+    const text = await readTextTail(path, info.size);
+    for (const [index, line] of text.split(/\r?\n/u).filter(Boolean).entries()) entries.push({ id: `legacy:${path}:${index}`, at, stream, line });
+  }
+  return entries;
+}
+function encodeLogCursor(at: string, id: string): string { return Buffer.from(JSON.stringify({ at, id })).toString('base64url'); }
+function decodeLogCursor(value: string | undefined): { at: string; id: string } | null {
+  if (!value) return null;
+  if (Number.isFinite(Date.parse(value))) return { at: value, id: '\uffff' };
+  try { const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as { at?: unknown; id?: unknown }; return typeof parsed.at === 'string' && typeof parsed.id === 'string' && Number.isFinite(Date.parse(parsed.at)) ? { at: parsed.at, id: parsed.id } : null; } catch { return null; }
+}
+function parseLogCursor(value: string): { at: string; id: string } | null { return decodeLogCursor(value); }
+function compareLogCursor(left: Pick<LogJournalEntry, 'at' | 'id'>, right: Pick<LogJournalEntry, 'at' | 'id'>): number { return left.at.localeCompare(right.at) || left.id.localeCompare(right.id); }
+async function readTextTail(path: string, bytes: number): Promise<string> {
+  if (!bytes) return '';
+  try {
+    const info = await stat(path);
+    const handle = await open(path, 'r');
+    try {
+      const data = Buffer.allocUnsafe(bytes);
+      const { bytesRead } = await handle.read(data, 0, bytes, Math.max(0, info.size - bytes));
+      return data.subarray(0, bytesRead).toString('utf8');
+    } finally { await handle.close(); }
+  } catch { return ''; }
+}
