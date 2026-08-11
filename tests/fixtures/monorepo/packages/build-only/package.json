@@ -1,0 +1,7 @@
+{
+  "name": "build-only",
+  "private": true,
+  "scripts": {
+    "dev": "rimraf dist && pnpm esbuild && tsc --emitDeclarationOnly --outDir dist"
+  }
+}

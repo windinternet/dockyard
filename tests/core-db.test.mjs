@@ -6,6 +6,7 @@ import test from 'node:test';
 import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanProject } from '../packages/core/dist/index.js';
 import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
+import { ProjectService } from '../apps/api/dist/project.service.js';
 import { DatabaseSync } from 'node:sqlite';
 
 const fixture = resolve('tests/fixtures/scannable');
@@ -30,6 +31,18 @@ test('scanner imports each runnable workspace module once and excludes workspace
   assert.deepEqual(preview.applications.map((application) => application.name), ['service']);
   assert.deepEqual(preview.applications[0]?.commandOptions.map((option) => option.name), ['dev', 'start']);
   assert.equal(preview.applications[0]?.selectedCommand, 'dev');
+});
+
+test('project scan marks previously imported modules absent from the new candidates as stale', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-stale-test-'));
+  const database = await DockyardDatabase.open(new PathResolver(state));
+  const preview = await scanProject(monorepoFixture, false);
+  const stale = { ...preview.applications[0], key: `script:${join(monorepoFixture, 'packages/build-only')}`, name: 'build-only', cwd: join(monorepoFixture, 'packages/build-only') };
+  database.importProject(preview.root, preview.projectName, [...preview.applications, stale]);
+  const service = new ProjectService({ db: database }, {});
+  const result = await service.scan({ path: monorepoFixture, includePm2: false });
+  assert.deepEqual(result.staleApplications.map((application) => application.name), ['build-only']);
+  database.close();
 });
 
 test('database import remains idempotent by project path and application name', async () => {

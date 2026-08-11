@@ -120,6 +120,8 @@ export function restartPolicyForPreset(preset: RestartPreset): RestartPolicy {
 }
 
 const runnableScript = /^(dev|start|serve)$/i;
+const oneShotBuildTool = /\b(?:tsc|esbuild|rimraf|rollup|swc|babel)\b/iu;
+const persistentCommand = /\b(?:watch|serve|dev-server)\b/iu;
 const excludedDirectories = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', 'test', 'tests', 'fixtures', 'examples']);
 
 interface PackageManifest { name?: unknown; scripts?: unknown; workspaces?: unknown; }
@@ -138,7 +140,7 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
     const cwd = resolve(manifestPath, '..');
     if (cwd === root && (manifest.workspaces !== undefined || hasPnpmWorkspace)) continue;
     const commandOptions = Object.entries(scripts)
-      .filter(([script, value]) => typeof value === 'string' && runnableScript.test(script))
+      .filter(([script, value]) => isRunnableScript(script, value))
       .map(([name]) => ({ name, command: { executable: packageManagerFor(cwd), args: ['run', name] } }));
     if (!commandOptions.length) continue;
     const selected = commandOptions.find((option) => option.name === 'dev') ?? commandOptions.find((option) => option.name === 'start') ?? commandOptions[0]!;
@@ -156,6 +158,11 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
     }
   }
   return { root, projectName: basename(root), applications: deduplicateCandidates(applications), warnings };
+}
+
+/** A dev/start name alone is not enough: known build pipelines exit successfully after one run. */
+function isRunnableScript(name: string, value: unknown): value is string {
+  return typeof value === 'string' && runnableScript.test(name) && (!oneShotBuildTool.test(value) || persistentCommand.test(value));
 }
 
 /** Discovers direct child code repositories without treating a parent folder as a Project itself. */
