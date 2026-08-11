@@ -34,6 +34,9 @@ export type RuntimeUpdate = { type: 'application'; application: Application } | 
 const execFileAsync = promisify(execFile);
 const nodeRelatedCommand = /\b(?:node(?:js)?|npm|pnpm|yarn|bun|vite|next|webpack|ts-node|tsx|deno)\b/iu;
 const maxLogReadBytes = 64 * 1_024;
+const gracefulShutdownTimeoutMs = 2_000;
+
+export interface ChildTerminationOptions { processGroup?: boolean; gracePeriodMs?: number; }
 
 @Injectable()
 export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -92,11 +95,11 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     if (runtime.ownership === 'external') return this.stopExternal(id, runtime);
     runtime.manuallyStopped = true;
     runtime.status = 'stopped';
-    const exited = new Promise<void>((done) => runtime.child?.once('exit', () => done()));
-    runtime.child?.kill('SIGTERM');
-    try { await waitFor(exited, 5_000, '应用未在 5 秒内优雅退出。它仍在运行，未执行强制终止；请检查日志和进程状态。'); }
+    if (!runtime.child) throw new RequestTimeoutException('托管应用缺少子进程句柄，无法安全停止。');
+    let signal: NodeJS.Signals;
+    try { signal = await terminateChildProcess(runtime.child, { processGroup: platform() !== 'win32' }); }
     catch (error) { runtime.status = 'running'; this.terminalStatuses.set(id, 'running'); throw error; }
-    this.database.db.recordEvent({ applicationId: id, type: 'stopped', detail: { signal: 'SIGTERM', source: 'dockyard' } });
+    this.database.db.recordEvent({ applicationId: id, type: 'stopped', detail: { signal, forced: signal === 'SIGKILL', source: 'dockyard' } });
     return this.application(id);
   }
 
@@ -112,7 +115,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   onUpdate(listener: (update: RuntimeUpdate) => void): () => void { this.updates.on('update', listener); return () => this.updates.off('update', listener); }
 
   private launch(application: Application, retries: number): void {
-    const child = spawn(application.command.executable, [...application.command.args], { cwd: application.cwd, shell: false, stdio: ['ignore', 'pipe', 'pipe'], env: inheritedEnvironment() });
+    const child = spawn(application.command.executable, [...application.command.args], { cwd: application.cwd, shell: false, detached: platform() !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], env: inheritedEnvironment() });
     const runtime: Runtime = { child, pid: child.pid ?? null, ownership: 'dockyard', application, status: 'running', startedAt: Date.now(), retries, manuallyStopped: false, listeningPorts: [], logBuffers: {} };
     this.runtimes.set(application.id, runtime);
     this.emitApplication(application.id);
@@ -137,8 +140,8 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     this.projectRuntimes.set(project.id, runtime);
     this.database.db.recordProjectEvent(project.id, 'started', { entrypoint: entrypoint.name, command: redactCommandForDisplay(entrypoint.command), pid: child.pid, source: 'dockyard' });
     this.emitProject(project.id);
-    child.once('error', (error) => this.finishProjectEntrypoint(project.id, runtime, null, error.message));
-    child.once('exit', (code) => this.finishProjectEntrypoint(project.id, runtime, code, undefined));
+    child.once('error', (error) => this.finishProjectEntrypoint(project.id, runtime, null, null, error.message));
+    child.once('exit', (code, signal) => this.finishProjectEntrypoint(project.id, runtime, code, signal, undefined));
   }
   private async stopProjectEntrypoint(runtime: ProjectRuntime): Promise<void> {
     this.stoppingProjects.add(runtime.project.id);
@@ -146,17 +149,16 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     runtime.manuallyStopped = true;
     runtime.status = 'stopped';
     this.cancelProjectRetry(runtime.project.id);
-    const exited = new Promise<void>((done) => runtime.child.once('exit', () => done()));
-    if (runtime.child.pid && platform() !== 'win32') process.kill(-runtime.child.pid, 'SIGTERM'); else runtime.child.kill('SIGTERM');
-    try { await waitFor(exited, 5_000, '项目入口未在 5 秒内优雅退出。它仍在运行，未执行强制终止。'); }
+    let signal: NodeJS.Signals;
+    try { signal = await terminateChildProcess(runtime.child, { processGroup: platform() !== 'win32' }); }
     catch (error) { this.stoppingProjects.delete(runtime.project.id); runtime.status = 'running'; throw error; }
-    this.database.db.recordProjectEvent(runtime.project.id, 'stopped', { entrypoint: runtime.project.settings.selectedProjectEntrypoint, signal: 'SIGTERM', source: 'dockyard' });
+    this.database.db.recordProjectEvent(runtime.project.id, 'stopped', { entrypoint: runtime.project.settings.selectedProjectEntrypoint, signal, forced: signal === 'SIGKILL', source: 'dockyard' });
   }
-  private finishProjectEntrypoint(projectId: string, runtime: ProjectRuntime, code: number | null, error: string | undefined): void {
+  private finishProjectEntrypoint(projectId: string, runtime: ProjectRuntime, code: number | null, signal: NodeJS.Signals | null, error: string | undefined): void {
     if (this.projectRuntimes.get(projectId) !== runtime) return;
     this.projectRuntimes.delete(projectId);
     const project = runtime.project;
-    this.database.db.recordProjectEvent(projectId, 'exited', { entrypoint: project.settings.selectedProjectEntrypoint, code, error, runtimeMs: Date.now() - runtime.startedAt, source: 'dockyard' });
+    this.database.db.recordProjectEvent(projectId, 'exited', { entrypoint: project.settings.selectedProjectEntrypoint, code, signal, error, runtimeMs: Date.now() - runtime.startedAt, source: 'dockyard' });
     const failed = code !== 0;
     const shouldRetry = !runtime.manuallyStopped && (project.settings.restartPolicy.mode === 'always' || (project.settings.restartPolicy.mode === 'on-failure' && failed));
     if (!shouldRetry) { this.projectTerminalStatuses.set(projectId, runtime.manuallyStopped || code === 0 ? 'stopped' : 'crashed'); this.emitProject(projectId); return; }
@@ -182,12 +184,20 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     }
     runtime.manuallyStopped = true;
     runtime.status = 'stopped';
-    try { process.kill(runtime.pid, 'SIGTERM'); } catch (error) { runtime.status = 'running'; runtime.manuallyStopped = false; this.terminalStatuses.set(id, 'running'); throw new RequestTimeoutException(`无法向外部进程发送 SIGTERM：${error instanceof Error ? error.message : '未知错误'}`); }
-    try { await waitForProcessExit(runtime.pid, 5_000); }
-    catch (error) { runtime.status = 'running'; runtime.manuallyStopped = false; this.terminalStatuses.set(id, 'running'); throw error; }
+    let signal: NodeJS.Signals = 'SIGTERM';
+    try {
+      process.kill(runtime.pid, signal);
+      await waitForProcessExit(runtime.pid, gracefulShutdownTimeoutMs);
+    } catch (error) {
+      if (!(error instanceof RequestTimeoutException)) { runtime.status = 'running'; runtime.manuallyStopped = false; this.terminalStatuses.set(id, 'running'); throw new RequestTimeoutException(`无法向外部进程发送 SIGTERM：${error instanceof Error ? error.message : '未知错误'}`); }
+      if (!await this.isCurrentExternalRuntime(runtime)) { runtime.status = 'running'; runtime.manuallyStopped = false; this.terminalStatuses.set(id, 'running'); throw new RequestTimeoutException('外部进程在强制终止前已变化，已拒绝向可能复用的 PID 发送 SIGKILL。'); }
+      signal = 'SIGKILL';
+      try { process.kill(runtime.pid, signal); await waitForProcessExit(runtime.pid, gracefulShutdownTimeoutMs); }
+      catch (forceError) { runtime.status = 'running'; runtime.manuallyStopped = false; this.terminalStatuses.set(id, 'running'); throw new RequestTimeoutException(`外部进程在 SIGKILL 后仍未退出：${forceError instanceof Error ? forceError.message : '未知错误'}`); }
+    }
     if (this.runtimes.get(id) === runtime) this.runtimes.delete(id);
-    this.database.db.recordEvent({ applicationId: id, type: 'exited', detail: { code: null, signal: 'SIGTERM', runtimeMs: Date.now() - runtime.startedAt, source: 'external' } });
-    this.database.db.recordEvent({ applicationId: id, type: 'stopped', detail: { signal: 'SIGTERM', source: 'external' } });
+    this.database.db.recordEvent({ applicationId: id, type: 'exited', detail: { code: null, signal, runtimeMs: Date.now() - runtime.startedAt, source: 'external' } });
+    this.database.db.recordEvent({ applicationId: id, type: 'stopped', detail: { signal, forced: signal === 'SIGKILL', source: 'external' } });
     this.emitApplication(id);
     return this.application(id);
   }
@@ -515,8 +525,33 @@ function parseElapsedMs(value: string): number | null { const [daysPart, clock] 
 function samePorts(left: readonly number[], right: readonly number[]): boolean { return left.length === right.length && left.every((port, index) => port === right[index]); }
 function chunks<T>(items: readonly T[], size: number): T[][] { const result: T[][] = []; for (let index = 0; index < items.length; index += size) result.push(items.slice(index, index + size)); return result; }
 function inheritedEnvironment(): NodeJS.ProcessEnv { const names = ['PATH', 'HOME', 'USER', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'TERM', 'SystemRoot']; const entries = names.flatMap((name): [string, string][] => { const value = process.env[name]; return value === undefined ? [] : [[name, value]]; }); return Object.fromEntries(entries); }
-async function waitFor(promise: Promise<void>, timeoutMs: number, message: string): Promise<void> { await Promise.race([promise, new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new RequestTimeoutException(message)), timeoutMs); timer.unref(); })]); }
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { try { process.kill(pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw new RequestTimeoutException('外部进程无法确认已退出。'); } await new Promise((done) => setTimeout(done, 100)); } throw new RequestTimeoutException('应用未在 5 秒内优雅退出。它仍在运行，未执行强制终止；请检查进程状态。'); }
+/** Sends SIGTERM first, then escalates to SIGKILL when a Dockyard-owned process does not exit. */
+export async function terminateChildProcess(child: ChildProcess, options: ChildTerminationOptions = {}): Promise<NodeJS.Signals> {
+  const { processGroup = false, gracePeriodMs = gracefulShutdownTimeoutMs } = options;
+  const exited = new Promise<void>((done) => child.once('exit', () => done()));
+  sendChildSignal(child, 'SIGTERM', processGroup);
+  try {
+    await waitFor(exited, gracePeriodMs, '应用未在优雅退出期限内停止。');
+    return 'SIGTERM';
+  } catch {
+    sendChildSignal(child, 'SIGKILL', processGroup);
+    await waitFor(exited, gracePeriodMs, '应用在 SIGKILL 后仍未退出；请检查操作系统进程状态。');
+    return 'SIGKILL';
+  }
+}
+
+function sendChildSignal(child: ChildProcess, signal: NodeJS.Signals, processGroup: boolean): void {
+  if (processGroup && child.pid) process.kill(-child.pid, signal);
+  else if (!child.kill(signal)) throw new RequestTimeoutException(`无法向托管应用发送 ${signal}。`);
+}
+
+async function waitFor<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new RequestTimeoutException(message)), timeoutMs); timer.unref(); })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { try { process.kill(pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw new RequestTimeoutException('外部进程无法确认已退出。'); } await new Promise((done) => setTimeout(done, 100)); } throw new RequestTimeoutException('应用未在 5 秒内优雅退出。它仍在运行，未执行强制终止；请检查日志和进程状态。'); }
 function appendRotatedLog(directory: string, stream: LogStream, data: Buffer, policy: Application['logPolicy']): void { const path = `${directory}/${stream}.log`; if (existsAndExceeds(path, data.length, policy.maxBytesPerFile)) { const archive = `${directory}/archive`; mkdirSync(archive, { recursive: true }); renameSync(path, `${archive}/${stream}-${Date.now()}.log`); pruneArchives(archive, policy); } appendFileSync(path, data); }
 function existsAndExceeds(path: string, incoming: number, limit: number): boolean { try { return statSync(path).size + incoming > limit; } catch { return false; } }
 function pruneArchives(directory: string, policy: Application['logPolicy']): void { const cutoff = Date.now() - policy.retentionDays * 86_400_000; const files = readdirSync(directory).map((name) => ({ name, path: `${directory}/${name}`, stat: statSync(`${directory}/${name}`) })).sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs); for (const file of files.slice(policy.maxFiles)) unlinkSync(file.path); for (const file of files) if (file.stat.mtimeMs < cutoff) { try { unlinkSync(file.path); } catch {} } }

@@ -9,7 +9,8 @@ import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanPro
 import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { ProjectService } from '../apps/api/dist/project.service.js';
-import { externalLogFilesFromDescriptors, matchingProcesses, parseProcessTable, readLogTail, RuntimeService, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
+import { externalLogFilesFromDescriptors, logCaptureStatusFor, matchingProcesses, parseProcessTable, readLogTail, RuntimeService, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
+import { terminateChildProcess } from '../apps/api/dist/runtime.service.js';
 import { ApplicationsController, runtimeEvent } from '../apps/api/dist/applications.controller.js';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -19,6 +20,19 @@ const monorepoFixture = resolve('tests/fixtures/monorepo');
 test('runtime SSE emits named events so subscribed UI handlers receive metrics', () => {
   const event = runtimeEvent({ type: 'metric', metric: { applicationId: 'app-1', sampledAt: '2026-08-11T00:00:00.000Z', pid: 1, cpuPercent: 0, uptimeMs: 1, restartCount: 0, rssBytes: 1 } });
   assert.equal(event.type, 'metric');
+});
+
+test('managed processes that ignore SIGTERM are force-stopped with SIGKILL after the grace period', { skip: process.platform === 'win32' }, async () => {
+  const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1_000)"] , { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  assert.ok(child.pid);
+  try {
+    await new Promise((resolve) => child.stdout?.once('data', resolve));
+    const signal = await terminateChildProcess(child, { processGroup: true, gracePeriodMs: 25 });
+    assert.equal(signal, 'SIGKILL');
+    assert.equal(child.signalCode, 'SIGKILL');
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) process.kill(-child.pid, 'SIGKILL');
+  }
 });
 
 test('combined log tail replays and follows stdout and stderr through one subscription', async () => {
