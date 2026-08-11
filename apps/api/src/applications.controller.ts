@@ -9,7 +9,7 @@ export class ApplicationsController {
   @Sse('stream') stream(): Observable<MessageEvent> { return new Observable((subscriber) => this.runtime.onUpdate((update) => subscriber.next(runtimeEvent(update)))); }
   @Get(':id') get(@Param('id') id: string) { return publicApplication(this.runtime.application(id)); }
   @Get(':id/events') events(@Param('id') id: string) { return { events: this.runtime.events(id) }; }
-  @Get(':id/metrics') @Header('Cache-Control', 'no-store') metrics(@Param('id') id: string) { return { metrics: this.runtime.metrics(id) }; }
+  @Get(':id/metrics') @Header('Cache-Control', 'no-store') metrics(@Param('id') id: string, @Query('window') window?: string) { if (window !== undefined && window !== 'recent' && window !== 'day') throw new BadRequestException('window 必须是 recent 或 day。'); return { metrics: this.runtime.metrics(id, window ?? 'recent') }; }
   @Post(':id/start') async start(@Param('id') id: string) { return publicApplication(await this.runtime.start(id)); }
   @Post(':id/stop') async stop(@Param('id') id: string) { return publicApplication(await this.runtime.stop(id)); }
   @Post(':id/restart') async restart(@Param('id') id: string) { return publicApplication(await this.runtime.restart(id)); }

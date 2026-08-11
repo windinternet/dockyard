@@ -44,12 +44,13 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly stoppingProjects = new Set<string>();
   private readonly logs = new EventEmitter();
   private readonly updates = new EventEmitter();
+  private metricRetentionDays = 7;
   private sampler: ReturnType<typeof setInterval>;
   private discovering = false;
 
   constructor(private readonly database: DatabaseService) { this.sampler = this.createSampler(1_000); }
 
-  onApplicationBootstrap(): void { this.setSampleInterval(this.database.db.settings().sampleIntervalMs); }
+  onApplicationBootstrap(): void { const settings = this.database.db.settings(); this.metricRetentionDays = settings.metricRetentionDays; this.setSampleInterval(settings.sampleIntervalMs); }
   onModuleDestroy(): void {
     clearInterval(this.sampler);
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
@@ -64,7 +65,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   applications(): Application[] { return this.database.db.listApplications().map((application) => this.withStatus(application)); }
   application(id: string): Application { const application = this.database.db.getApplication(id); if (!application) throw new NotFoundException('应用不存在。'); return this.withStatus(application); }
   events(id: string) { this.application(id); return this.database.db.events(id).map((event) => ({ ...event, detail: redactDisplayValue(event.detail) as Record<string, unknown> })); }
-  metrics(id: string) { this.application(id); return this.database.db.metrics(id, new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString()); }
+  metrics(id: string, window: 'recent' | 'day' = 'recent') { this.application(id); const since = new Date(Date.now() - (window === 'day' ? 24 * 60 * 60 * 1_000 : this.metricRetentionDays * 86_400_000)).toISOString(); return this.database.db.metrics(id, since, window === 'recent' ? 60 : undefined); }
   async diagnostics(id: string): Promise<{ path: string }> { const application = this.application(id); const directory = this.database.db.pathResolver.diagnosticsDirectory(id); const path = `${directory}.json`; await mkdir(dirname(path), { recursive: true }); await writeFile(path, JSON.stringify({ generatedAt: new Date().toISOString(), application: { ...application, command: redactCommandForDisplay(application.command) }, events: this.events(id), metrics: this.metrics(id) }, null, 2), { encoding: 'utf8', flag: 'wx' }); this.database.db.recordEvent({ applicationId: id, type: 'diagnostics-exported', detail: { path } }); return { path }; }
 
   async start(id: string): Promise<Application> { const application = this.application(id); if (this.runtimes.has(id)) return application; this.stoppingProjects.delete(application.projectId); this.cancelRetry(id); this.terminalStatuses.delete(id); this.launch(application, 0); return this.application(id); }
@@ -77,6 +78,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   updateCommand(id: string, selectedCommand: string): Application { if (this.runtimes.has(id)) throw new RequestTimeoutException('运行中的应用不能切换启动命令；请先停止它。'); return this.withStatus(this.database.db.updateApplicationCommand(id, selectedCommand)); }
   updateProjectSettings(projectId: string, settings: ProjectSettings) { const project = this.database.db.updateProjectSettings(projectId, settings); this.reloadRunningPolicies(); const runtime = this.projectRuntimes.get(projectId); if (runtime) runtime.project = project; this.emitProject(projectId); return this.withProjectRuntime(project); }
   setSampleInterval(intervalMs: number): void { clearInterval(this.sampler); this.sampler = this.createSampler(intervalMs); this.sample(); }
+  setMetricRetentionDays(days: number): void { this.metricRetentionDays = days; }
 
   async stop(id: string): Promise<Application> {
     const runtime = this.runtimes.get(id);
@@ -296,7 +298,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     const process = await inspectProcess(runtime.pid ?? undefined);
     if (this.runtimes.get(applicationId) !== runtime) return;
     const metric: MetricRollup = { applicationId, sampledAt: new Date().toISOString(), pid: runtime.pid, cpuPercent: process?.cpuPercent ?? null, uptimeMs: Date.now() - runtime.startedAt, restartCount: runtime.retries, rssBytes: process?.rssBytes ?? null };
-    this.database.db.recordMetric(metric);
+    this.database.db.recordMetric(metric, this.metricRetentionDays);
     this.updates.emit('update', { type: 'metric', metric } satisfies RuntimeUpdate);
   }
   private async isCurrentExternalRuntime(runtime: Runtime): Promise<boolean> {
