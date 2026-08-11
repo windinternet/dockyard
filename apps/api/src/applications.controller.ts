@@ -13,6 +13,7 @@ export class ApplicationsController {
   @Post(':id/start') async start(@Param('id') id: string) { return publicApplication(await this.runtime.start(id)); }
   @Post(':id/stop') async stop(@Param('id') id: string) { return publicApplication(await this.runtime.stop(id)); }
   @Post(':id/restart') async restart(@Param('id') id: string) { return publicApplication(await this.runtime.restart(id)); }
+  @Post(':id/log-capture/inspector') async enableInspectorLogCapture(@Param('id') id: string) { return publicApplication(await this.runtime.enableInspectorLogCapture(id)); }
   @Patch(':id/policies') policies(@Param('id') id: string, @Body() body: unknown) { const value = record(body); const restartPolicy = parseRestartPolicy(value?.restartPolicy); const logPolicy = parseLogPolicy(value?.logPolicy); if (!restartPolicy || !logPolicy) throw new BadRequestException('重启或日志策略无效。'); return publicApplication(this.runtime.updatePolicies(id, restartPolicy, logPolicy)); }
   @Patch(':id/command') command(@Param('id') id: string, @Body() body: unknown) { const value = record(body); if (!value || typeof value.selectedCommand !== 'string') throw new BadRequestException('启动命令无效。'); return publicApplication(this.runtime.updateCommand(id, value.selectedCommand)); }
   @Post(':id/diagnostics') diagnostics(@Param('id') id: string) { return this.runtime.diagnostics(id); }

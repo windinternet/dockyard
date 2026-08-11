@@ -7,7 +7,7 @@ export type ProjectStartupPreference = 'automatic' | 'project-first' | 'module-f
 /** Identifies whether the currently observed process was created by Dockyard or adopted from the host. */
 export type RuntimeOwnership = 'dockyard' | 'external' | null;
 /** Describes whether Dockyard can receive newly emitted log output for this runtime. */
-export type LogCaptureStatus = 'streaming' | 'file-backed' | 'unavailable' | 'inactive';
+export type LogCaptureStatus = 'streaming' | 'file-backed' | 'inspector' | 'unavailable' | 'inactive';
 export type RestartMode = 'never' | 'on-failure' | 'always';
 export type LogStream = 'stdout' | 'stderr';
 

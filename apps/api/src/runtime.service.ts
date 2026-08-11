@@ -8,6 +8,7 @@ import { platform } from 'node:os';
 import { promisify } from 'node:util';
 import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, type Application, type ApplicationStatus, type LogCaptureStatus, type LogStream, type MetricRollup, type Project, type ProjectSettings, type RuntimeOwnership } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
+import { startInspectorLogCapture, type InspectorLogCapture } from './inspector-log-capture.js';
 
 interface Runtime {
   child?: ChildProcess;
@@ -20,6 +21,7 @@ interface Runtime {
   manuallyStopped: boolean;
   listeningPorts: readonly number[];
   externalLogs?: Partial<Record<LogStream, ExternalLogCursor>>;
+  inspectorCapture?: InspectorLogCapture;
   logBuffers: Partial<Record<LogStream, string>>;
 }
 
@@ -64,6 +66,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     for (const timer of this.projectRetryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
     this.restartQueues.clear();
+    for (const runtime of this.runtimes.values()) runtime.inspectorCapture?.close();
     for (const runtime of this.runtimes.values()) if (runtime.ownership === 'dockyard') runtime.child?.kill('SIGTERM');
     for (const runtime of this.projectRuntimes.values()) runtime.child.kill('SIGTERM');
   }
@@ -77,6 +80,23 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
 
   async start(id: string): Promise<Application> { const application = this.application(id); if (this.runtimes.has(id)) return application; this.stoppingProjects.delete(application.projectId); this.cancelRetry(id); this.terminalStatuses.delete(id); this.launch(application, 0); return this.application(id); }
   async restart(id: string): Promise<Application> { await this.stop(id); return this.start(id); }
+  async enableInspectorLogCapture(id: string): Promise<Application> {
+    const runtime = this.runtimes.get(id);
+    if (!runtime || runtime.ownership !== 'external' || !runtime.pid) throw new RequestTimeoutException('仅运行中的外部 Node 应用可启用 Inspector 日志捕获。');
+    if (runtime.inspectorCapture) return this.application(id);
+    const captured = await startInspectorLogCapture(runtime.pid, (stream, data) => {
+      if (this.runtimes.get(id) !== runtime) return;
+      const directory = this.database.db.pathResolver.logDirectory(runtime.application.projectId, runtime.application.id);
+      mkdirSync(directory, { recursive: true });
+      this.recordLogData(runtime, stream, data, directory);
+    }, () => {
+      if (runtime.inspectorCapture === captured) { delete runtime.inspectorCapture; this.emitApplication(id); }
+    });
+    runtime.inspectorCapture = captured;
+    this.database.db.recordEvent({ applicationId: id, type: 'external-log-following', detail: { streams: ['stdout', 'stderr'], source: 'node-inspector' } });
+    this.emitApplication(id);
+    return this.application(id);
+  }
   async startProject(projectId: string): Promise<Application[]> { const project = this.project(projectId); if (this.shouldUseProjectEntrypoint(project)) { this.startProjectEntrypoint(project); return []; } const applications = this.database.db.listApplications(projectId); const startup = project.settings.startupApplicationIds.length ? applications.filter((application) => project.settings.startupApplicationIds.includes(application.id)) : applications; return Promise.all(startup.map((application) => this.start(application.id))); }
   async stopProject(projectId: string): Promise<Application[]> { const project = this.project(projectId); const projectRuntime = this.projectRuntimes.get(projectId); if (projectRuntime) { await this.stopProjectEntrypoint(projectRuntime); return []; } if (this.projectRetryTimers.has(projectId)) { this.stoppingProjects.add(projectId); this.cancelProjectRetry(projectId); this.cancelModuleRestarts(projectId); this.projectTerminalStatuses.set(projectId, 'stopped'); this.database.db.recordProjectEvent(projectId, 'stopped', { entrypoint: project.settings.selectedProjectEntrypoint, source: 'dockyard', reason: 'restart-cancelled' }); this.emitProject(projectId); return []; } const applications = this.database.db.listApplications(projectId); return Promise.all(applications.map((application) => this.stop(application.id))); }
   async restartProject(projectId: string): Promise<Application[]> { await this.stopProject(projectId); return this.startProject(projectId); }
@@ -220,6 +240,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
 
   private finish(applicationId: string, runtime: Runtime, code: number | null, signal: NodeJS.Signals | null, error: string | undefined): void {
     if (this.runtimes.get(applicationId) !== runtime) return;
+    runtime.inspectorCapture?.close();
     this.runtimes.delete(applicationId);
     const application = runtime.application;
     const elapsed = Date.now() - runtime.startedAt;
@@ -329,7 +350,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     runtime.startedAt = observed.startedAt;
     runtime.listeningPorts = observed.listeningPorts;
     runtime.status = 'running';
-    if (changed) runtime.externalLogs = await externalLogCursors(observed.pid);
+    if (changed) { runtime.inspectorCapture?.close(); delete runtime.inspectorCapture; runtime.externalLogs = await externalLogCursors(observed.pid); }
     await this.collectExternalLogs(runtime);
     if (changed) this.emitApplication(application.id);
   }
@@ -392,9 +413,10 @@ export function externalLogFilesFromDescriptors(descriptors: Partial<Record<1 | 
   return result;
 }
 
-export function logCaptureStatusFor(runtime: Pick<Runtime, 'ownership' | 'externalLogs'> | undefined): LogCaptureStatus {
+export function logCaptureStatusFor(runtime: Pick<Runtime, 'ownership' | 'externalLogs' | 'inspectorCapture'> | undefined): LogCaptureStatus {
   if (!runtime) return 'inactive';
   if (runtime.ownership === 'dockyard') return 'streaming';
+  if (runtime.inspectorCapture) return 'inspector';
   return Object.keys(runtime.externalLogs ?? {}).length ? 'file-backed' : 'unavailable';
 }
 
