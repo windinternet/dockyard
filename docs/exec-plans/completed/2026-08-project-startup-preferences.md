@@ -20,4 +20,4 @@
 
 ## 验证
 
-运行 `pnpm test`、`pnpm check`、`pnpm docs:check`，覆盖 workspace 根入口发现、持久化启动偏好和既有扫描/数据库回归。
+已运行 `pnpm test`、`pnpm check`、`pnpm docs:check`，覆盖 workspace 根入口发现、持久化启动偏好和既有扫描/数据库回归。

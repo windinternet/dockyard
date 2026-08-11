@@ -41,6 +41,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly projectRuntimes = new Map<string, ProjectRuntime>();
   private readonly projectTerminalStatuses = new Map<string, ApplicationStatus>();
   private readonly projectRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly stoppingProjects = new Set<string>();
   private readonly logs = new EventEmitter();
   private readonly updates = new EventEmitter();
   private sampler: ReturnType<typeof setInterval>;
@@ -66,15 +67,15 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   metrics(id: string) { this.application(id); return this.database.db.metrics(id, new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString()); }
   async diagnostics(id: string): Promise<{ path: string }> { const application = this.application(id); const directory = this.database.db.pathResolver.diagnosticsDirectory(id); const path = `${directory}.json`; await mkdir(dirname(path), { recursive: true }); await writeFile(path, JSON.stringify({ generatedAt: new Date().toISOString(), application: { ...application, command: redactCommandForDisplay(application.command) }, events: this.events(id), metrics: this.metrics(id) }, null, 2), { encoding: 'utf8', flag: 'wx' }); this.database.db.recordEvent({ applicationId: id, type: 'diagnostics-exported', detail: { path } }); return { path }; }
 
-  async start(id: string): Promise<Application> { const application = this.application(id); if (this.runtimes.has(id)) return application; this.cancelRetry(id); this.terminalStatuses.delete(id); this.launch(application, 0); return this.application(id); }
+  async start(id: string): Promise<Application> { const application = this.application(id); if (this.runtimes.has(id)) return application; this.stoppingProjects.delete(application.projectId); this.cancelRetry(id); this.terminalStatuses.delete(id); this.launch(application, 0); return this.application(id); }
   async restart(id: string): Promise<Application> { await this.stop(id); return this.start(id); }
   async startProject(projectId: string): Promise<Application[]> { const project = this.project(projectId); if (this.shouldUseProjectEntrypoint(project)) { this.startProjectEntrypoint(project); return []; } const applications = this.database.db.listApplications(projectId); const startup = project.settings.startupApplicationIds.length ? applications.filter((application) => project.settings.startupApplicationIds.includes(application.id)) : applications; return Promise.all(startup.map((application) => this.start(application.id))); }
-  async stopProject(projectId: string): Promise<Application[]> { const project = this.project(projectId); const projectRuntime = this.projectRuntimes.get(projectId); if (projectRuntime) { await this.stopProjectEntrypoint(projectRuntime); return []; } const applications = this.database.db.listApplications(projectId); return Promise.all(applications.map((application) => this.stop(application.id))); }
+  async stopProject(projectId: string): Promise<Application[]> { const project = this.project(projectId); const projectRuntime = this.projectRuntimes.get(projectId); if (projectRuntime) { await this.stopProjectEntrypoint(projectRuntime); return []; } if (this.projectRetryTimers.has(projectId)) { this.stoppingProjects.add(projectId); this.cancelProjectRetry(projectId); this.cancelModuleRestarts(projectId); this.projectTerminalStatuses.set(projectId, 'stopped'); this.database.db.recordProjectEvent(projectId, 'stopped', { entrypoint: project.settings.selectedProjectEntrypoint, source: 'dockyard', reason: 'restart-cancelled' }); this.emitProject(projectId); return []; } const applications = this.database.db.listApplications(projectId); return Promise.all(applications.map((application) => this.stop(application.id))); }
   async restartProject(projectId: string): Promise<Application[]> { await this.stopProject(projectId); return this.startProject(projectId); }
   async deleteProject(projectId: string): Promise<void> { this.project(projectId); await this.stopProject(projectId); this.database.db.deleteProject(projectId); }
   updatePolicies(id: string, restartPolicy: Application['restartPolicy'], logPolicy: Application['logPolicy']): Application { const application = this.database.db.updateApplicationPolicies(id, restartPolicy, logPolicy); const runtime = this.runtimes.get(id); if (runtime) runtime.application = application; return this.withStatus(application); }
   updateCommand(id: string, selectedCommand: string): Application { if (this.runtimes.has(id)) throw new RequestTimeoutException('运行中的应用不能切换启动命令；请先停止它。'); return this.withStatus(this.database.db.updateApplicationCommand(id, selectedCommand)); }
-  updateProjectSettings(projectId: string, settings: ProjectSettings) { const project = this.database.db.updateProjectSettings(projectId, settings); this.reloadRunningPolicies(); this.emitProject(projectId); return this.withProjectRuntime(project); }
+  updateProjectSettings(projectId: string, settings: ProjectSettings) { const project = this.database.db.updateProjectSettings(projectId, settings); this.reloadRunningPolicies(); const runtime = this.projectRuntimes.get(projectId); if (runtime) runtime.project = project; this.emitProject(projectId); return this.withProjectRuntime(project); }
   setSampleInterval(intervalMs: number): void { clearInterval(this.sampler); this.sampler = this.createSampler(intervalMs); this.sample(); }
 
   async stop(id: string): Promise<Application> {
@@ -115,35 +116,45 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     const entrypoint = this.entrypointFor(project);
     if (!entrypoint) throw new RequestTimeoutException('项目优先模式需要先在项目设置中选择项目级启动入口。');
     this.cancelProjectRetry(project.id);
+    this.stoppingProjects.delete(project.id);
+    this.cancelModuleRestarts(project.id);
     this.projectTerminalStatuses.delete(project.id);
     const child = spawn(entrypoint.command.executable, [...entrypoint.command.args], { cwd: project.path, shell: false, detached: platform() !== 'win32', stdio: 'ignore', env: inheritedEnvironment() });
     const runtime: ProjectRuntime = { child, project, status: 'running', startedAt: Date.now(), retries, manuallyStopped: false };
     this.projectRuntimes.set(project.id, runtime);
+    this.database.db.recordProjectEvent(project.id, 'started', { entrypoint: entrypoint.name, command: redactCommandForDisplay(entrypoint.command), pid: child.pid, source: 'dockyard' });
     this.emitProject(project.id);
     child.once('error', (error) => this.finishProjectEntrypoint(project.id, runtime, null, error.message));
     child.once('exit', (code) => this.finishProjectEntrypoint(project.id, runtime, code, undefined));
   }
   private async stopProjectEntrypoint(runtime: ProjectRuntime): Promise<void> {
+    this.stoppingProjects.add(runtime.project.id);
+    this.cancelModuleRestarts(runtime.project.id);
     runtime.manuallyStopped = true;
     runtime.status = 'stopped';
     this.cancelProjectRetry(runtime.project.id);
     const exited = new Promise<void>((done) => runtime.child.once('exit', () => done()));
     if (runtime.child.pid && platform() !== 'win32') process.kill(-runtime.child.pid, 'SIGTERM'); else runtime.child.kill('SIGTERM');
     try { await waitFor(exited, 5_000, '项目入口未在 5 秒内优雅退出。它仍在运行，未执行强制终止。'); }
-    catch (error) { runtime.status = 'running'; throw error; }
+    catch (error) { this.stoppingProjects.delete(runtime.project.id); runtime.status = 'running'; throw error; }
+    this.database.db.recordProjectEvent(runtime.project.id, 'stopped', { entrypoint: runtime.project.settings.selectedProjectEntrypoint, signal: 'SIGTERM', source: 'dockyard' });
   }
   private finishProjectEntrypoint(projectId: string, runtime: ProjectRuntime, code: number | null, error: string | undefined): void {
     if (this.projectRuntimes.get(projectId) !== runtime) return;
     this.projectRuntimes.delete(projectId);
     const project = runtime.project;
+    this.database.db.recordProjectEvent(projectId, 'exited', { entrypoint: project.settings.selectedProjectEntrypoint, code, error, runtimeMs: Date.now() - runtime.startedAt, source: 'dockyard' });
     const failed = code !== 0;
     const shouldRetry = !runtime.manuallyStopped && (project.settings.restartPolicy.mode === 'always' || (project.settings.restartPolicy.mode === 'on-failure' && failed));
     if (!shouldRetry) { this.projectTerminalStatuses.set(projectId, runtime.manuallyStopped || code === 0 ? 'stopped' : 'crashed'); this.emitProject(projectId); return; }
     if (Date.now() - runtime.startedAt >= project.settings.restartPolicy.stableWindowMs) runtime.retries = 0;
-    if (runtime.retries >= project.settings.restartPolicy.maxRetries) { this.projectTerminalStatuses.set(projectId, 'crashed'); this.emitProject(projectId); return; }
+    if (runtime.retries >= project.settings.restartPolicy.maxRetries) { this.projectTerminalStatuses.set(projectId, 'crashed'); this.database.db.recordProjectEvent(projectId, 'crashed', { reason: 'restart-budget-exhausted', retries: runtime.retries }); this.emitProject(projectId); return; }
+    this.cancelModuleRestarts(projectId);
     this.projectTerminalStatuses.set(projectId, 'restarting');
     this.emitProject(projectId);
-    const timer = setTimeout(() => { this.projectRetryTimers.delete(projectId); this.startProjectEntrypoint(project, runtime.retries + 1); }, project.settings.restartPolicy.retryDelayMs * 2 ** runtime.retries);
+    const delay = project.settings.restartPolicy.retryDelayMs * 2 ** runtime.retries;
+    this.database.db.recordProjectEvent(projectId, 'restart-scheduled', { delayMs: delay, retry: runtime.retries + 1 });
+    const timer = setTimeout(() => { this.projectRetryTimers.delete(projectId); this.startProjectEntrypoint(project, runtime.retries + 1); }, delay);
     timer.unref();
     this.projectRetryTimers.set(projectId, timer);
     void error;
@@ -177,8 +188,9 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     const elapsed = Date.now() - runtime.startedAt;
     this.database.db.recordEvent({ applicationId, type: 'exited', detail: { code, signal, error, runtimeMs: elapsed, source: runtime.ownership } });
     const failed = runtime.ownership === 'external' || code !== 0;
-    const shouldRetry = !runtime.manuallyStopped && (application.restartPolicy.mode === 'always' || (application.restartPolicy.mode === 'on-failure' && failed));
-    if (!shouldRetry) { this.terminalStatuses.set(application.id, runtime.manuallyStopped || code === 0 ? 'stopped' : 'crashed'); this.emitApplication(application.id); return; }
+    const projectOwnsLifecycle = this.projectRuntimes.has(application.projectId) || this.projectRetryTimers.has(application.projectId) || this.stoppingProjects.has(application.projectId);
+    const shouldRetry = !projectOwnsLifecycle && !runtime.manuallyStopped && (application.restartPolicy.mode === 'always' || (application.restartPolicy.mode === 'on-failure' && failed));
+    if (!shouldRetry) { this.terminalStatuses.set(application.id, runtime.manuallyStopped || this.stoppingProjects.has(application.projectId) || code === 0 ? 'stopped' : 'crashed'); this.emitApplication(application.id); return; }
     if (elapsed >= application.restartPolicy.stableWindowMs) runtime.retries = 0;
     if (runtime.retries >= application.restartPolicy.maxRetries) { this.terminalStatuses.set(application.id, 'crashed'); this.database.db.recordEvent({ applicationId: application.id, type: 'crashed', detail: { reason: 'restart-budget-exhausted', retries: runtime.retries, source: runtime.ownership } }); this.emitApplication(application.id); return; }
     const delay = application.restartPolicy.retryDelayMs * 2 ** runtime.retries;
@@ -200,6 +212,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     }
   }
   private cancelProjectRetry(id: string): void { const timer = this.projectRetryTimers.get(id); if (timer) clearTimeout(timer); this.projectRetryTimers.delete(id); }
+  private cancelModuleRestarts(projectId: string): void { for (const application of this.database.db.listApplications(projectId)) this.cancelRetry(application.id); }
   private enqueueRestart(application: Application, retries: number): void {
     const queue = this.restartQueues.get(application.projectId) ?? [];
     queue.push({ application, retries });
