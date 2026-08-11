@@ -23,6 +23,7 @@ interface Runtime {
 
 export interface HostProcess { pid: number; ppid: number; startedAt: number; command: string; cwd?: string; }
 export interface ObservedProcess { pid: number; startedAt: number; listeningPorts: readonly number[]; }
+interface RestartRequest { application: Application; retries: number; }
 export interface LogMessage { applicationId: string; stream: LogStream; at: string; line: string; }
 export type RuntimeUpdate = { type: 'application'; application: Application } | { type: 'metric'; metric: MetricRollup };
 
@@ -34,6 +35,8 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly runtimes = new Map<string, Runtime>();
   private readonly terminalStatuses = new Map<string, ApplicationStatus>();
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly restartQueues = new Map<string, RestartRequest[]>();
+  private readonly restartingProjects = new Set<string>();
   private readonly logs = new EventEmitter();
   private readonly updates = new EventEmitter();
   private sampler: ReturnType<typeof setInterval>;
@@ -46,6 +49,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     clearInterval(this.sampler);
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
+    this.restartQueues.clear();
     for (const runtime of this.runtimes.values()) if (runtime.ownership === 'dockyard') runtime.child?.kill('SIGTERM');
   }
 
@@ -71,9 +75,9 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     this.cancelRetry(id);
     this.terminalStatuses.set(id, 'stopped');
     if (!runtime) return this.application(id);
+    if (runtime.ownership === 'external') return this.stopExternal(id, runtime);
     runtime.manuallyStopped = true;
     runtime.status = 'stopped';
-    if (runtime.ownership === 'external') return this.stopExternal(id, runtime);
     const exited = new Promise<void>((done) => runtime.child?.once('exit', () => done()));
     runtime.child?.kill('SIGTERM');
     try { await waitFor(exited, 5_000, '应用未在 5 秒内优雅退出。它仍在运行，未执行强制终止；请检查日志和进程状态。'); }
@@ -101,6 +105,13 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
 
   private async stopExternal(id: string, runtime: Runtime): Promise<Application> {
     if (!runtime.pid) throw new RequestTimeoutException('外部进程缺少 PID，无法安全停止。');
+    if (!await this.isCurrentExternalRuntime(runtime)) {
+      runtime.status = 'running';
+      this.terminalStatuses.set(id, 'running');
+      throw new RequestTimeoutException('外部进程已变化，已拒绝发送信号；请刷新后确认目标。');
+    }
+    runtime.manuallyStopped = true;
+    runtime.status = 'stopped';
     try { process.kill(runtime.pid, 'SIGTERM'); } catch (error) { runtime.status = 'running'; runtime.manuallyStopped = false; this.terminalStatuses.set(id, 'running'); throw new RequestTimeoutException(`无法向外部进程发送 SIGTERM：${error instanceof Error ? error.message : '未知错误'}`); }
     try { await waitForProcessExit(runtime.pid, 5_000); }
     catch (error) { runtime.status = 'running'; runtime.manuallyStopped = false; this.terminalStatuses.set(id, 'running'); throw error; }
@@ -128,12 +139,41 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     this.terminalStatuses.set(application.id, 'restarting');
     this.emitApplication(application.id);
     this.database.db.recordEvent({ applicationId: application.id, type: 'restart-scheduled', detail: { delayMs: delay, retry: runtime.retries + 1, source: runtime.ownership } });
-    const timer = setTimeout(() => { this.retryTimers.delete(application.id); if (!this.runtimes.has(application.id)) this.launch(application, runtime.retries + 1); }, delay);
+    const timer = setTimeout(() => { this.retryTimers.delete(application.id); this.enqueueRestart(application, runtime.retries + 1); }, delay);
     timer.unref();
     this.retryTimers.set(application.id, timer);
   }
 
-  private cancelRetry(id: string): void { const timer = this.retryTimers.get(id); if (timer) clearTimeout(timer); this.retryTimers.delete(id); }
+  private cancelRetry(id: string): void {
+    const timer = this.retryTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.retryTimers.delete(id);
+    for (const queue of this.restartQueues.values()) {
+      const index = queue.findIndex((request) => request.application.id === id);
+      if (index >= 0) queue.splice(index, 1);
+    }
+  }
+  private enqueueRestart(application: Application, retries: number): void {
+    const queue = this.restartQueues.get(application.projectId) ?? [];
+    queue.push({ application, retries });
+    this.restartQueues.set(application.projectId, queue);
+    if (this.restartingProjects.has(application.projectId)) return;
+    this.restartingProjects.add(application.projectId);
+    void this.drainProjectRestartQueue(application.projectId);
+  }
+  private async drainProjectRestartQueue(projectId: string): Promise<void> {
+    try {
+      const queue = this.restartQueues.get(projectId);
+      while (queue?.length) {
+        const request = queue.shift()!;
+        if (!this.runtimes.has(request.application.id)) this.launch(request.application, request.retries);
+        await new Promise((done) => setTimeout(done, 50));
+      }
+    } finally {
+      this.restartQueues.delete(projectId);
+      this.restartingProjects.delete(projectId);
+    }
+  }
   private withStatus(application: Application): Application { const runtime = this.runtimes.get(application.id); return { ...application, status: runtime?.status ?? this.terminalStatuses.get(application.id) ?? 'stopped', pid: runtime?.pid ?? null, runtimeOwnership: runtime?.ownership ?? null, listeningPorts: runtime?.listeningPorts ?? [] }; }
   private project(id: string) { const project = this.database.db.listProjects().find((item) => item.id === id); if (!project) throw new NotFoundException('项目不存在。'); return project; }
   private sample(): void { void this.reconcileExternalRuntimes(); for (const [applicationId, runtime] of this.runtimes) void this.sampleRuntime(applicationId, runtime); }
@@ -151,8 +191,12 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
       const ports = await listeningPortsByPid(pids);
       for (const application of applications) {
         const runtime = this.runtimes.get(application.id);
-        if (runtime?.ownership === 'dockyard') continue;
         const observed = selectObservedProcess(matches.get(application.id) ?? [], ports);
+        if (runtime?.ownership === 'dockyard') {
+          const nextPorts = observed?.listeningPorts ?? [];
+          if (!samePorts(runtime.listeningPorts, nextPorts)) { runtime.listeningPorts = nextPorts; this.emitApplication(application.id); }
+          continue;
+        }
         if (observed) this.adoptExternalRuntime(application, runtime, observed);
         else if (runtime?.ownership === 'external') this.finish(application.id, runtime, null, null, '外部进程已从本机进程表消失。');
       }
@@ -185,6 +229,11 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     this.database.db.recordMetric(metric);
     this.updates.emit('update', { type: 'metric', metric } satisfies RuntimeUpdate);
   }
+  private async isCurrentExternalRuntime(runtime: Runtime): Promise<boolean> {
+    const result = await listHostProcesses();
+    if (!result.available || runtime.pid === null) return false;
+    return matchingProcesses(runtime.application, result.processes).some((process) => sameProcessIdentity(runtime.pid!, runtime.startedAt, process));
+  }
   private emitApplication(id: string): void { const application = this.database.db.getApplication(id); if (application) this.updates.emit('update', { type: 'application', application: this.withStatus(application) } satisfies RuntimeUpdate); }
 }
 
@@ -209,6 +258,9 @@ export function selectObservedProcess(processes: readonly HostProcess[], ports: 
   const listeningPorts = [...new Set(processes.flatMap((process) => ports.get(process.pid) ?? []))].sort((left, right) => left - right);
   return { pid: ordered[0]!.pid, startedAt: ordered[0]!.startedAt, listeningPorts };
 }
+
+/** PID reuse is possible, so a destructive operation requires both PID and process start time to still match. */
+export function sameProcessIdentity(pid: number, startedAt: number, process: Pick<HostProcess, 'pid' | 'startedAt'>): boolean { return pid === process.pid && Math.abs(startedAt - process.startedAt) < 2_000; }
 
 async function listHostProcesses(): Promise<{ available: boolean; processes: HostProcess[] }> {
   try {

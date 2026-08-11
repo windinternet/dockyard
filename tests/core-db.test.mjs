@@ -7,7 +7,7 @@ import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanPro
 import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { ProjectService } from '../apps/api/dist/project.service.js';
-import { matchingProcesses, parseProcessTable, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
+import { matchingProcesses, parseProcessTable, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
 import { DatabaseSync } from 'node:sqlite';
 
 const fixture = resolve('tests/fixtures/scannable');
@@ -109,6 +109,8 @@ test('external process discovery matches an imported application by cwd and pref
   const observed = selectObservedProcess(matches, new Map([[101, []], [102, [4318, 5173]]]));
   assert.deepEqual(matches.map((process) => process.pid), [101, 102]);
   assert.deepEqual(observed, { pid: 102, startedAt: now - 3_723_000, listeningPorts: [4318, 5173] });
+  assert.equal(sameProcessIdentity(102, now - 3_723_000, processes[1]), true);
+  assert.equal(sameProcessIdentity(102, now - 3_700_000, processes[1]), false);
 });
 
 test('database upgrades the legacy local schema while preserving project and application configuration', async () => {
