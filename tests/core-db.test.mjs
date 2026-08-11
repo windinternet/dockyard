@@ -112,9 +112,10 @@ test('settings are versioned and apply retention and restart presets to managed 
   const database = await DockyardDatabase.open(new PathResolver(state));
   const preview = await scanProject(fixture, false);
   const imported = database.importProject(preview.root, preview.projectName, preview.applications);
-  const settings = database.applySettings({ retentionDays: 30, maxFiles: 9, maxBytesPerFile: 2_097_152, restartPreset: 'manual' });
+  const settings = database.applySettings({ retentionDays: 30, maxFiles: 9, maxBytesPerFile: 2_097_152, restartPreset: 'manual', logAutoScrollPauseMs: 45_000 });
   const application = database.getApplication(imported.applications[0].id);
   assert.equal(settings.version, 1);
+  assert.equal(settings.logAutoScrollPauseMs, 45_000);
   assert.equal(database.settings().version, 1);
   assert.deepEqual(application?.logPolicy, { retentionDays: 30, maxFiles: 9, maxBytesPerFile: 2_097_152 });
   assert.equal(application?.restartPolicy.mode, 'never');
