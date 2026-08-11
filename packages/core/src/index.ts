@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 
 export type ApplicationStatus = 'stopped' | 'starting' | 'running' | 'restarting' | 'crashed';
+export type ProjectStartupPreference = 'automatic' | 'project-first' | 'module-first';
 /** Identifies whether the currently observed process was created by Dockyard or adopted from the host. */
 export type RuntimeOwnership = 'dockyard' | 'external' | null;
 export type RestartMode = 'never' | 'on-failure' | 'always';
@@ -44,8 +45,19 @@ export interface ApplicationCommandOption {
 export interface ProjectSettings {
   /** Empty means every application in the project participates in one-click start. */
   startupApplicationIds: readonly string[];
+  /** Determines whether a project root entrypoint or individual modules own one-click lifecycle actions. */
+  startupPreference: ProjectStartupPreference;
+  projectEntrypointOptions: readonly ApplicationCommandOption[];
+  selectedProjectEntrypoint: string | null;
   restartPolicy: RestartPolicy;
   logPolicy: LogPolicy;
+}
+
+export interface ProjectRuntime {
+  status: ApplicationStatus;
+  pid: number | null;
+  ownership: RuntimeOwnership;
+  selectedEntrypoint: string | null;
 }
 
 export interface Project {
@@ -53,6 +65,7 @@ export interface Project {
   path: string;
   name: string;
   settings: ProjectSettings;
+  runtime: ProjectRuntime;
   createdAt: string;
 }
 
@@ -108,13 +121,15 @@ export interface ImportPreviewApplication {
 export interface ImportPreview {
   root: string;
   projectName: string;
+  projectEntrypointOptions: readonly ApplicationCommandOption[];
+  selectedProjectEntrypoint: string | null;
   applications: readonly ImportPreviewApplication[];
   warnings: readonly Pm2ConversionWarning[];
 }
 
 export const defaultRestartPolicy: RestartPolicy = Object.freeze({ mode: 'on-failure', maxRetries: 5, retryDelayMs: 1_000, stableWindowMs: 30_000 });
 export const defaultLogPolicy: LogPolicy = Object.freeze({ maxFiles: 5, maxBytesPerFile: 10 * 1024 * 1024, retentionDays: 14 });
-export const defaultProjectSettings: ProjectSettings = Object.freeze({ startupApplicationIds: [], restartPolicy: defaultRestartPolicy, logPolicy: defaultLogPolicy });
+export const defaultProjectSettings: ProjectSettings = Object.freeze({ startupApplicationIds: [], startupPreference: 'automatic', projectEntrypointOptions: [], selectedProjectEntrypoint: null, restartPolicy: defaultRestartPolicy, logPolicy: defaultLogPolicy });
 export const defaultDockyardSettings: DockyardSettings = Object.freeze({ version: 0, sampleIntervalMs: 1_000, retentionDays: 14, maxFiles: 5, maxBytesPerFile: 10 * 1024 * 1024, restartPreset: 'balanced' });
 
 export function restartPolicyForPreset(preset: RestartPreset): RestartPolicy {
@@ -138,11 +153,17 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
   const manifests = await discoverPackageManifests(root, 3);
   const applications: ImportPreviewApplication[] = [];
   const warnings: Pm2ConversionWarning[] = [];
+  let projectEntrypointOptions: ApplicationCommandOption[] = [];
   for (const manifestPath of manifests) {
     const manifest = await readJson<PackageManifest>(manifestPath);
     const scripts = isRecord(manifest.scripts) ? manifest.scripts : {};
     const cwd = resolve(manifestPath, '..');
-    if (cwd === root && (manifest.workspaces !== undefined || hasPnpmWorkspace)) continue;
+    if (cwd === root) {
+      projectEntrypointOptions = Object.entries(scripts)
+        .filter(([script, value]) => isProjectEntrypointScript(script, value))
+        .map(([name]) => ({ name, command: { executable: packageManagerFor(cwd), args: ['run', name] } }));
+      if (manifest.workspaces !== undefined || hasPnpmWorkspace) continue;
+    }
     const commandOptions = Object.entries(scripts)
       .filter(([script, value]) => isRunnableScript(script, value))
       .map(([name]) => ({ name, command: { executable: packageManagerFor(cwd), args: ['run', name] } }));
@@ -161,12 +182,16 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
       warnings.push(...result.warnings);
     }
   }
-  return { root, projectName: basename(root), applications: deduplicateCandidates(applications), warnings };
+  const selectedProjectEntrypoint = projectEntrypointOptions.find((option) => option.name === 'dev')?.name ?? projectEntrypointOptions.find((option) => /:dev$/iu.test(option.name))?.name ?? projectEntrypointOptions[0]?.name ?? null;
+  return { root, projectName: basename(root), projectEntrypointOptions, selectedProjectEntrypoint, applications: deduplicateCandidates(applications), warnings };
 }
 
 /** A dev/start name alone is not enough: known build pipelines exit successfully after one run. */
 function isRunnableScript(name: string, value: unknown): value is string {
   return typeof value === 'string' && runnableScript.test(name) && (!oneShotBuildTool.test(value) || persistentCommand.test(value));
+}
+function isProjectEntrypointScript(name: string, value: unknown): value is string {
+  return typeof value === 'string' && (isRunnableScript(name, value) || /:(?:dev|start|serve)$/iu.test(name));
 }
 
 /** Discovers direct child code repositories without treating a parent folder as a Project itself. */
@@ -219,7 +244,10 @@ export function parseCommandOptions(value: unknown): ApplicationCommandOption[] 
 export function parseProjectSettings(value: unknown): ProjectSettings | null {
   if (!isRecord(value) || !Array.isArray(value.startupApplicationIds) || !value.startupApplicationIds.every((id) => typeof id === 'string')) return null;
   const restartPolicy = parseRestartPolicy(value.restartPolicy); const logPolicy = parseLogPolicy(value.logPolicy);
-  return restartPolicy && logPolicy ? { startupApplicationIds: value.startupApplicationIds, restartPolicy, logPolicy } : null;
+  const startupPreference = value.startupPreference === undefined ? 'automatic' : ['automatic', 'project-first', 'module-first'].includes(String(value.startupPreference)) ? value.startupPreference as ProjectStartupPreference : null;
+  const projectEntrypointOptions = value.projectEntrypointOptions === undefined ? [] : parseCommandOptions(value.projectEntrypointOptions);
+  const selectedProjectEntrypoint = value.selectedProjectEntrypoint === undefined ? null : typeof value.selectedProjectEntrypoint === 'string' ? value.selectedProjectEntrypoint : value.selectedProjectEntrypoint === null ? null : undefined;
+  return restartPolicy && logPolicy && startupPreference && projectEntrypointOptions && selectedProjectEntrypoint !== undefined && (selectedProjectEntrypoint === null || projectEntrypointOptions.some((option) => option.name === selectedProjectEntrypoint)) ? { startupApplicationIds: value.startupApplicationIds, startupPreference, projectEntrypointOptions, selectedProjectEntrypoint, restartPolicy, logPolicy } : null;
 }
 
 export function parseRestartPolicy(value: unknown): RestartPolicy | null {

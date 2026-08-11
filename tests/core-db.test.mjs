@@ -32,6 +32,20 @@ test('scanner imports each runnable workspace module once and excludes workspace
   assert.deepEqual(preview.applications.map((application) => application.name), ['service']);
   assert.deepEqual(preview.applications[0]?.commandOptions.map((option) => option.name), ['dev', 'start']);
   assert.equal(preview.applications[0]?.selectedCommand, 'dev');
+  assert.deepEqual(preview.projectEntrypointOptions.map((option) => option.name), ['dev']);
+  assert.equal(preview.selectedProjectEntrypoint, 'dev');
+});
+
+test('project startup preferences preserve a selected workspace root entrypoint', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-entrypoint-test-'));
+  const database = await DockyardDatabase.open(new PathResolver(state));
+  const preview = await scanProject(monorepoFixture, false);
+  const imported = database.importProject(preview.root, preview.projectName, preview.applications, preview.projectEntrypointOptions, preview.selectedProjectEntrypoint);
+  const settings = database.updateProjectSettings(imported.project.id, { ...imported.project.settings, startupPreference: 'project-first' });
+  assert.equal(settings.settings.startupPreference, 'project-first');
+  assert.equal(settings.settings.selectedProjectEntrypoint, 'dev');
+  assert.deepEqual(settings.settings.projectEntrypointOptions.map((option) => option.command.args), [['run', 'dev']]);
+  database.close();
 });
 
 test('project scan marks previously imported modules absent from the new candidates as stale', async () => {

@@ -30,6 +30,9 @@ export class ProjectService {
     if (!body || typeof body.path !== 'string' || typeof body.name !== 'string' || !Array.isArray(body.applications)) throw new BadRequestException('导入请求无效。');
     const candidates = body.applications.map(parseCandidate);
     if (candidates.some((candidate) => candidate === null)) throw new BadRequestException('应用候选包含无效命令或策略。');
+    const projectEntrypointOptions = body.projectEntrypointOptions === undefined ? [] : parseCommandOptions(body.projectEntrypointOptions);
+    const selectedProjectEntrypoint = body.selectedProjectEntrypoint === undefined ? null : typeof body.selectedProjectEntrypoint === 'string' ? body.selectedProjectEntrypoint : body.selectedProjectEntrypoint === null ? null : undefined;
+    if (!projectEntrypointOptions || selectedProjectEntrypoint === undefined || (selectedProjectEntrypoint !== null && !projectEntrypointOptions.some((option) => option.name === selectedProjectEntrypoint))) throw new BadRequestException('项目级启动入口无效。');
     const root = resolve(body.path);
     if ((candidates as ImportPreviewApplication[]).some((candidate) => outside(root, candidate.cwd))) throw new BadRequestException('应用工作目录必须位于导入项目内。');
     const project = this.database.db.listProjects().find((item) => item.path === root);
@@ -39,7 +42,7 @@ export class ProjectService {
       if (stale.some((application) => this.runtime.application(application.id).status === 'running')) throw new BadRequestException('请先停止过时的应用记录，再确认替换。');
       if (body.replaceStale === true) this.database.db.removeApplications(stale.map((application) => application.id));
     }
-    return this.database.db.importProject(root, body.name, candidates as ImportPreviewApplication[]);
+    return this.database.db.importProject(root, body.name, candidates as ImportPreviewApplication[], projectEntrypointOptions, selectedProjectEntrypoint);
   }
   importMany(input: unknown) {
     const body = record(input);
@@ -51,7 +54,7 @@ export class ProjectService {
       return this.import(candidate);
     }) };
   }
-  list() { return this.database.db.listProjects(); }
+  list() { return this.runtime.projects(); }
   async start(id: string) { return { applications: await this.runtime.startProject(id) }; }
   async stop(id: string) { return { applications: await this.runtime.stopProject(id) }; }
   async restart(id: string) { return { applications: await this.runtime.restartProject(id) }; }
@@ -66,7 +69,7 @@ export class ProjectService {
   private preview(preview: ImportPreview) {
     const project = this.database.db.listProjects().find((item) => item.path === preview.root);
     const staleApplications = project ? staleApplicationsFor(this.database.db.listApplications(project.id), preview.applications).map((application) => ({ id: application.id, name: application.name, cwd: application.cwd })) : [];
-    return { project: { path: preview.root, name: preview.projectName }, applications: preview.applications, warnings: preview.warnings, staleApplications };
+    return { project: { path: preview.root, name: preview.projectName, entrypointOptions: preview.projectEntrypointOptions, selectedEntrypoint: preview.selectedProjectEntrypoint }, applications: preview.applications, warnings: preview.warnings, staleApplications };
   }
 }
 function parseCandidate(value: unknown): ImportPreviewApplication | null {
