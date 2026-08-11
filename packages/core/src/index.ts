@@ -6,6 +6,8 @@ export type ApplicationStatus = 'stopped' | 'starting' | 'running' | 'restarting
 export type ProjectStartupPreference = 'automatic' | 'project-first' | 'module-first';
 /** Identifies whether the currently observed process was created by Dockyard or adopted from the host. */
 export type RuntimeOwnership = 'dockyard' | 'external' | null;
+/** Describes whether Dockyard can receive newly emitted log output for this runtime. */
+export type LogCaptureStatus = 'streaming' | 'file-backed' | 'unavailable' | 'inactive';
 export type RestartMode = 'never' | 'on-failure' | 'always';
 export type LogStream = 'stdout' | 'stderr';
 
@@ -84,6 +86,8 @@ export interface Application {
   status: ApplicationStatus;
   pid: number | null;
   runtimeOwnership: RuntimeOwnership;
+  /** Runtime-only state. Persisted application records do not carry this value. */
+  logCaptureStatus?: LogCaptureStatus;
   listeningPorts: readonly number[];
   restartPolicy: RestartPolicy;
   logPolicy: LogPolicy;

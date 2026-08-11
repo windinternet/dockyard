@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { platform } from 'node:os';
 import { promisify } from 'node:util';
-import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, type Application, type ApplicationStatus, type LogStream, type MetricRollup, type Project, type ProjectSettings, type RuntimeOwnership } from '@dockyard/core';
+import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, type Application, type ApplicationStatus, type LogCaptureStatus, type LogStream, type MetricRollup, type Project, type ProjectSettings, type RuntimeOwnership } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
 
 interface Runtime {
@@ -104,7 +104,10 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   onLog(listener: (message: LogMessage) => void): () => void { this.logs.on('line', listener); return () => this.logs.off('line', listener); }
   async logTail(id: string, stream: LogStream): Promise<LogMessage[]> {
     const application = this.application(id);
-    return (await readLogTail(`${this.database.db.pathResolver.logDirectory(application.projectId, application.id)}/${stream}.log`)).map((line) => ({ applicationId: id, stream, at: new Date().toISOString(), line: redactDisplayText(line) }));
+    const path = `${this.database.db.pathResolver.logDirectory(application.projectId, application.id)}/${stream}.log`;
+    const [lines, info] = await Promise.all([readLogTail(path), stat(path).catch(() => null)]);
+    const at = info?.isFile() ? info.mtime.toISOString() : new Date(0).toISOString();
+    return lines.map((line) => ({ applicationId: id, stream, at, line: redactDisplayText(line) }));
   }
   onUpdate(listener: (update: RuntimeUpdate) => void): () => void { this.updates.on('update', listener); return () => this.updates.off('update', listener); }
 
@@ -258,7 +261,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
       this.restartingProjects.delete(projectId);
     }
   }
-  private withStatus(application: Application): Application { const runtime = this.runtimes.get(application.id); return { ...application, status: runtime?.status ?? this.terminalStatuses.get(application.id) ?? 'stopped', pid: runtime?.pid ?? null, runtimeOwnership: runtime?.ownership ?? null, listeningPorts: runtime?.listeningPorts ?? [] }; }
+  private withStatus(application: Application): Application { const runtime = this.runtimes.get(application.id); return { ...application, status: runtime?.status ?? this.terminalStatuses.get(application.id) ?? 'stopped', pid: runtime?.pid ?? null, runtimeOwnership: runtime?.ownership ?? null, logCaptureStatus: logCaptureStatusFor(runtime), listeningPorts: runtime?.listeningPorts ?? [] }; }
   private withProjectRuntime(project: Project): Project { const runtime = this.projectRuntimes.get(project.id); return { ...project, runtime: { status: runtime?.status ?? this.projectTerminalStatuses.get(project.id) ?? 'stopped', pid: runtime?.child.pid ?? null, ownership: runtime ? 'dockyard' : null, selectedEntrypoint: project.settings.selectedProjectEntrypoint } }; }
   private project(id: string) { const project = this.database.db.listProjects().find((item) => item.id === id); if (!project) throw new NotFoundException('项目不存在。'); return this.withProjectRuntime(project); }
   private entrypointFor(project: Project) { return project.settings.selectedProjectEntrypoint === null ? null : project.settings.projectEntrypointOptions.find((option) => option.name === project.settings.selectedProjectEntrypoint) ?? null; }
@@ -377,6 +380,12 @@ export function externalLogFilesFromDescriptors(descriptors: Partial<Record<1 | 
   if (isRegularLogFile(descriptors[1])) result.stdout = descriptors[1]!;
   if (isRegularLogFile(descriptors[2])) result.stderr = descriptors[2]!;
   return result;
+}
+
+export function logCaptureStatusFor(runtime: Pick<Runtime, 'ownership' | 'externalLogs'> | undefined): LogCaptureStatus {
+  if (!runtime) return 'inactive';
+  if (runtime.ownership === 'dockyard') return 'streaming';
+  return Object.keys(runtime.externalLogs ?? {}).length ? 'file-backed' : 'unavailable';
 }
 
 /** Reads the recent persisted tail so reconnecting SSE clients immediately receive useful context. */

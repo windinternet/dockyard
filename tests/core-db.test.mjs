@@ -157,6 +157,7 @@ test('external process discovery matches an imported application by cwd and pref
 });
 
 test('logs tail replays persisted output and external file-backed stdout/stderr can be collected', async () => {
+  const { logCaptureStatusFor } = await import('../apps/api/dist/runtime.service.js');
   const state = await mkdtemp(join(tmpdir(), 'dockyard-log-tail-test-'));
   const stdout = join(state, 'external.stdout.log');
   const stderr = join(state, 'external.stderr.log');
@@ -167,6 +168,10 @@ test('logs tail replays persisted output and external file-backed stdout/stderr 
   assert.deepEqual(await readLogTail(stdout), ['booted', 'ready']);
   assert.deepEqual(externalLogFilesFromDescriptors({ 1: stdout, 2: stderr }), { stdout, stderr });
   assert.deepEqual(externalLogFilesFromDescriptors({ 1: '/dev/ttys001', 2: 'pipe' }), {});
+  assert.equal(logCaptureStatusFor({ ownership: 'external', externalLogs: {} }), 'unavailable');
+  assert.equal(logCaptureStatusFor({ ownership: 'external', externalLogs: { stdout: { path: stdout, position: 0 } } }), 'file-backed');
+  assert.equal(logCaptureStatusFor({ ownership: 'dockyard', externalLogs: {} }), 'streaming');
+  assert.equal(logCaptureStatusFor(undefined), 'inactive');
 });
 
 test('runtime follows file-backed logs from an externally started process', { skip: process.platform === 'win32' }, async () => {
@@ -191,7 +196,9 @@ test('runtime follows file-backed logs from an externally started process', { sk
     await appendFile(stdoutPath, 'external-next\n');
     await runtime.collectExternalLogs(runtime.runtimes.get(application.id));
     assert.deepEqual(messages.map((message) => [message.stream, message.line]).sort(), [['stderr', 'external-warning'], ['stdout', 'external-next'], ['stdout', 'external-ready']]);
-    assert.deepEqual((await runtime.logTail(application.id, 'stdout')).map((message) => message.line), ['external-ready', 'external-next']);
+    const tail = await runtime.logTail(application.id, 'stdout');
+    assert.deepEqual(tail.map((message) => message.line), ['external-ready', 'external-next']);
+    assert.equal(tail[0]?.at, (await import('node:fs/promises').then(({ stat }) => stat(join(state, 'dockyard-state', 'logs', imported.project.id, application.id, 'stdout.log')))).mtime.toISOString());
   } finally {
     remove();
     child.kill('SIGTERM');
