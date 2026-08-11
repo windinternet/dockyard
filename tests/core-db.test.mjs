@@ -7,6 +7,7 @@ import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanPro
 import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { ProjectService } from '../apps/api/dist/project.service.js';
+import { matchingProcesses, parseProcessTable, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
 import { DatabaseSync } from 'node:sqlite';
 
 const fixture = resolve('tests/fixtures/scannable');
@@ -99,6 +100,15 @@ test('display redaction covers command flags, JSON values, and authorization hea
   assert.equal(redactDisplayText('token=abc Authorization: Bearer xyz {"secret":"keep-out"}'), 'token=[REDACTED] Authorization: Bearer [REDACTED] {"secret":[REDACTED]}');
   assert.deepEqual(redactCommandForDisplay({ executable: 'node', args: ['--api-key', 'abc', '--token=xyz', '{"password":"no"}'] }), { executable: 'node', args: ['--api-key', '[REDACTED]', '--token=[REDACTED]', '{"password":[REDACTED]}'] });
   assert.deepEqual(redactDisplayValue({ command: { token: 'abc' }, authorization: 'Bearer xyz' }), { command: { token: '[REDACTED]' }, authorization: '[REDACTED]' });
+});
+
+test('external process discovery matches an imported application by cwd and prefers its listening process', () => {
+  const now = Date.UTC(2026, 7, 11, 12, 0, 0);
+  const processes = parseProcessTable(' 101 1 00:02:00 node /workspace/demo/node_modules/.bin/vite\n 102 101 01:02:03 node server.js\n 103 1 00:01:00 node /workspace/other/server.js', now).map((process) => process.pid === 101 || process.pid === 102 ? { ...process, cwd: '/workspace/demo' } : { ...process, cwd: '/workspace/other' });
+  const matches = matchingProcesses({ cwd: '/workspace/demo' }, processes);
+  const observed = selectObservedProcess(matches, new Map([[101, []], [102, [4318, 5173]]]));
+  assert.deepEqual(matches.map((process) => process.pid), [101, 102]);
+  assert.deepEqual(observed, { pid: 102, startedAt: now - 3_723_000, listeningPorts: [4318, 5173] });
 });
 
 test('database upgrades the legacy local schema while preserving project and application configuration', async () => {

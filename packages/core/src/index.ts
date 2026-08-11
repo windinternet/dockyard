@@ -3,6 +3,8 @@ import { constants } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 
 export type ApplicationStatus = 'stopped' | 'starting' | 'running' | 'restarting' | 'crashed';
+/** Identifies whether the currently observed process was created by Dockyard or adopted from the host. */
+export type RuntimeOwnership = 'dockyard' | 'external' | null;
 export type RestartMode = 'never' | 'on-failure' | 'always';
 export type LogStream = 'stdout' | 'stderr';
 
@@ -64,6 +66,8 @@ export interface Application {
   selectedCommand: string;
   status: ApplicationStatus;
   pid: number | null;
+  runtimeOwnership: RuntimeOwnership;
+  listeningPorts: readonly number[];
   restartPolicy: RestartPolicy;
   logPolicy: LogPolicy;
   createdAt: string;

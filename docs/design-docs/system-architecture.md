@@ -8,13 +8,13 @@ NestJS 守护进程仅绑定回环地址（`127.0.0.1:4318`）。它通过版本
 
 ```text
 Project（绝对目录）1 ── * Application（可运行模块）
-Application 1 ── 1 RuntimeInstance（短暂的子进程）
+Application 1 ── 1 RuntimeInstance（短暂的 Dockyard 子进程或已发现的本机进程）
 Application 1 ── 1 RestartPolicy（重启策略）
 Application 1 ── 1 LogPolicy（日志策略）
 Application 1 ── * RuntimeSample / LifecycleEvent（汇总元数据）
 ```
 
-`Project` 是用户导入的目录元数据。`Application` 是扫描发现或用户明确配置的可运行单元，例如一个包工作区。`RuntimeInstance` 绝不作为持久事实保存；故障恢复时由应用配置重新构造。
+`Project` 是用户导入的目录元数据。`Application` 是扫描发现或用户明确配置的可运行单元，例如一个包工作区。`RuntimeInstance` 绝不作为持久事实保存：它可以是守护进程创建的子进程，也可以是按 Application 工作目录发现的本机进程。后者只提供可观察的 PID、监听端口和资源指标；其退出被守护进程判定后，恢复仍由应用配置重新构造。
 
 ## 存储
 
