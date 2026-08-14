@@ -6,10 +6,18 @@ export type ApplicationStatus = 'stopped' | 'starting' | 'running' | 'restarting
 export type ProjectStartupPreference = 'automatic' | 'project-first' | 'module-first';
 /** Identifies whether the currently observed process was created by Dockyard or adopted from the host. */
 export type RuntimeOwnership = 'dockyard' | 'external' | null;
+/** External processes are observed safely until a person explicitly allows recovery management. */
+export type ExternalRuntimeManagement = 'observe' | 'adopted';
 /** Describes whether Dockyard can receive newly emitted log output for this runtime. */
 export type LogCaptureStatus = 'streaming' | 'file-backed' | 'inspector' | 'unavailable' | 'inactive';
 export type RestartMode = 'never' | 'on-failure' | 'always';
 export type LogStream = 'stdout' | 'stderr';
+/** A profile declares the expected response to a source change; it never sends a signal itself. */
+export type ChangeImpact = 'hot-reload' | 'auto-restart' | 'manual-restart' | 'rebuild' | 'migration' | 'confirmation-required';
+/** Distinguishes a conclusion observed at runtime from one inferred from checked source. */
+export type ProfileEvidence = 'runtime-verified' | 'source-inspected' | 'unverified';
+export type PortReachability = 'not-configured' | 'unknown' | 'reachable' | 'unreachable';
+export type ServiceHealthStatus = 'not-configured' | 'unknown' | 'healthy' | 'unhealthy';
 
 export interface RestartPolicy {
   mode: RestartMode;
@@ -46,6 +54,39 @@ export interface ApplicationCommand {
 export interface ApplicationCommandOption {
   name: string;
   command: ApplicationCommand;
+}
+
+export interface ServiceHealthCheck {
+  type: 'http';
+  path: string;
+}
+
+export interface ServiceChangeRule {
+  id: string;
+  label: string;
+  impact: ChangeImpact;
+  evidence: ProfileEvidence;
+  explanation: string;
+}
+
+/** A project-specific, declarative service baseline. It deliberately contains no process handle. */
+export interface ServiceProfile {
+  profileId: string;
+  id: string;
+  serviceName: string;
+  cwd: string;
+  command: ApplicationCommand;
+  defaultPort?: number;
+  healthCheck?: ServiceHealthCheck;
+  restartPolicy: RestartPolicy;
+  changeRules: readonly ServiceChangeRule[];
+}
+
+export interface CompatibilityProfile {
+  id: string;
+  name: string;
+  evidence: ProfileEvidence;
+  services: readonly ServiceProfile[];
 }
 
 export interface ProjectSettings {
@@ -86,9 +127,14 @@ export interface Application {
   status: ApplicationStatus;
   pid: number | null;
   runtimeOwnership: RuntimeOwnership;
+  externalRuntimeManagement: ExternalRuntimeManagement;
   /** Runtime-only state. Persisted application records do not carry this value. */
   logCaptureStatus?: LogCaptureStatus;
   listeningPorts: readonly number[];
+  /** Runtime-only observations, deliberately independent from process ownership. */
+  portReachability: PortReachability;
+  healthStatus: ServiceHealthStatus;
+  serviceProfile?: ServiceProfile;
   restartPolicy: RestartPolicy;
   logPolicy: LogPolicy;
   createdAt: string;
@@ -98,7 +144,7 @@ export interface Application {
 export interface LifecycleEvent {
   id: string;
   applicationId: string;
-  type: 'started' | 'stopped' | 'exited' | 'restart-scheduled' | 'crashed' | 'diagnostics-exported' | 'external-log-following' | 'external-log-unavailable';
+  type: 'started' | 'stopped' | 'exited' | 'restart-scheduled' | 'crashed' | 'diagnostics-exported' | 'external-log-following' | 'external-log-unavailable' | 'external-adopted';
   occurredAt: string;
   detail: Record<string, unknown>;
 }
@@ -124,6 +170,7 @@ export interface ImportPreviewApplication {
   selectedCommand: string;
   restartPolicy: RestartPolicy;
   logPolicy: LogPolicy;
+  serviceProfile?: ServiceProfile;
   warnings: readonly Pm2ConversionWarning[];
 }
 export interface ImportPreview {
@@ -132,6 +179,7 @@ export interface ImportPreview {
   projectEntrypointOptions: readonly ApplicationCommandOption[];
   selectedProjectEntrypoint: string | null;
   applications: readonly ImportPreviewApplication[];
+  compatibilityProfile?: CompatibilityProfile;
   warnings: readonly Pm2ConversionWarning[];
 }
 
@@ -159,6 +207,7 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
   await assertDirectory(root);
   const hasPnpmWorkspace = await pathExists(join(root, 'pnpm-workspace.yaml'));
   const manifests = await discoverPackageManifests(root, 3);
+  const compatibilityProfile = await detectCompatibilityProfile(root);
   const applications: ImportPreviewApplication[] = [];
   const warnings: Pm2ConversionWarning[] = [];
   let projectEntrypointOptions: ApplicationCommandOption[] = [];
@@ -177,9 +226,10 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
       .map(([name]) => ({ name, command: { executable: packageManagerFor(cwd), args: ['run', name] } }));
     if (!commandOptions.length) continue;
     const selected = commandOptions.find((option) => option.name === 'dev') ?? commandOptions.find((option) => option.name === 'start') ?? commandOptions[0]!;
+    const serviceProfile = compatibilityProfile?.services.find((service) => service.cwd === cwd && sameCommand(service.command, selected.command));
     applications.push({
       key: `script:${cwd}`, origin: 'package-script', name: manifestName(manifest, cwd), cwd,
-      command: selected.command, commandOptions, selectedCommand: selected.name, restartPolicy: { ...defaultRestartPolicy }, logPolicy: { ...defaultLogPolicy }, warnings: []
+      command: selected.command, commandOptions, selectedCommand: selected.name, restartPolicy: { ...defaultRestartPolicy }, logPolicy: { ...defaultLogPolicy }, serviceProfile, warnings: []
     });
   }
   if (includePm2) {
@@ -191,7 +241,7 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
     }
   }
   const selectedProjectEntrypoint = projectEntrypointOptions.find((option) => option.name === 'dev')?.name ?? projectEntrypointOptions.find((option) => /:dev$/iu.test(option.name))?.name ?? projectEntrypointOptions[0]?.name ?? null;
-  return { root, projectName: basename(root), projectEntrypointOptions, selectedProjectEntrypoint, applications: deduplicateCandidates(applications), warnings };
+  return { root, projectName: basename(root), projectEntrypointOptions, selectedProjectEntrypoint, applications: deduplicateCandidates(applications), compatibilityProfile, warnings };
 }
 
 /** A dev/start name alone is not enough: known build pipelines exit successfully after one run. */
@@ -201,6 +251,44 @@ function isRunnableScript(name: string, value: unknown): value is string {
 function isProjectEntrypointScript(name: string, value: unknown): value is string {
   return typeof value === 'string' && (isRunnableScript(name, value) || /:(?:dev|start|serve)$/iu.test(name));
 }
+
+async function detectCompatibilityProfile(root: string): Promise<CompatibilityProfile | undefined> {
+  const [workspace, rootManifest, dashboardManifest, apiManifest, schedulesManifest, serverManifest, i18nManifest] = await Promise.all([
+    readFile(join(root, 'pnpm-workspace.yaml'), 'utf8').catch(() => null),
+    readPackageManifest(join(root, 'package.json')),
+    readPackageManifest(join(root, 'apps/dokploy/package.json')),
+    readPackageManifest(join(root, 'apps/api/package.json')),
+    readPackageManifest(join(root, 'apps/schedules/package.json')),
+    readPackageManifest(join(root, 'packages/server/package.json')),
+    readPackageManifest(join(root, 'packages/i18n/package.json')),
+  ]);
+  const expectedWorkspacePaths = ['apps/api', 'apps/dokploy', 'apps/schedules', 'packages/i18n', 'packages/server'];
+  const workspaceMatches = workspace !== null && expectedWorkspacePaths.every((path) => workspace.includes(`"${path}"`) || workspace.includes(`'${path}'`));
+  if (!workspaceMatches || rootManifest?.name !== 'dokploy' || dashboardManifest?.name !== 'dokploy' || apiManifest?.name !== '@dokploy/api' || schedulesManifest?.name !== '@dokploy/schedules' || serverManifest?.name !== '@dokploy/server' || i18nManifest?.name !== '@dokploy/i18n') return undefined;
+  if (scriptFor(dashboardManifest, 'dev') !== 'tsx -r dotenv/config ./server/server.ts --project tsconfig.server.json' || scriptFor(apiManifest, 'dev') !== 'PORT=4000 tsx watch src/index.ts' || scriptFor(schedulesManifest, 'dev') !== 'PORT=4001 tsx watch src/index.ts') return undefined;
+  const service = (id: string, serviceName: string, cwd: string, defaultPort: number, healthCheck: ServiceHealthCheck | undefined, changeRules: readonly ServiceChangeRule[]): ServiceProfile => ({ profileId: 'dokploy', id, serviceName, cwd: join(root, cwd), command: { executable: 'pnpm', args: ['run', 'dev'] }, defaultPort, ...(healthCheck ? { healthCheck } : {}), restartPolicy: { ...defaultRestartPolicy }, changeRules });
+  return {
+    id: 'dokploy', name: 'Dokploy 开发运行画像', evidence: 'source-inspected', services: [
+      service('dashboard', 'Dokploy 主面板', 'apps/dokploy', 3000, { type: 'http', path: '/' }, [
+        { id: 'next-ui', label: 'Next 页面与组件', impact: 'hot-reload', evidence: 'source-inspected', explanation: '自定义开发 server 显式把 HMR WebSocket 交给 Next；尚未对完整 Dokploy 进程做运行验证。' },
+        { id: 'custom-server', label: '自定义 Node server、WebSocket 与启动初始化', impact: 'manual-restart', evidence: 'runtime-verified', explanation: '该开发命令使用 tsx 但没有 watch；Dokploy 锁定的 tsx 实验在文件变化后未重启。' },
+        { id: 'shared-runtime', label: '共享包、环境变量、依赖或数据库结构', impact: 'confirmation-required', evidence: 'unverified', explanation: '这些影响须以依赖图和实际运行结果确认，不能由静态画像猜测。' },
+      ]),
+      service('api', 'Dokploy 部署 API', 'apps/api', 4000, { type: 'http', path: '/' }, [
+        { id: 'service-source', label: 'API 服务源文件', impact: 'auto-restart', evidence: 'runtime-verified', explanation: '开发命令使用 tsx watch；Dokploy 锁定的 tsx 实验确认文件变化会重启受监控入口。' },
+        { id: 'shared-runtime', label: '共享包、环境变量、依赖或数据库结构', impact: 'confirmation-required', evidence: 'unverified', explanation: '这些影响须以依赖图和实际运行结果确认，不能由静态画像猜测。' },
+      ]),
+      service('schedules', 'Dokploy 计划服务', 'apps/schedules', 4001, { type: 'http', path: '/' }, [
+        { id: 'service-source', label: '计划服务源文件', impact: 'auto-restart', evidence: 'runtime-verified', explanation: '开发命令使用 tsx watch；Dokploy 锁定的 tsx 实验确认文件变化会重启受监控入口。' },
+        { id: 'shared-runtime', label: '共享包、环境变量、依赖或数据库结构', impact: 'confirmation-required', evidence: 'unverified', explanation: '这些影响须以依赖图和实际运行结果确认，不能由静态画像猜测。' },
+      ]),
+    ]
+  };
+}
+async function readPackageManifest(path: string): Promise<PackageManifest | null> { try { return await readJson<PackageManifest>(path); } catch { return null; } }
+/** Package scripts are shell text, so insignificant whitespace is normalized before an otherwise exact match. */
+function scriptFor(manifest: PackageManifest, name: string): string | undefined { return isRecord(manifest.scripts) && typeof manifest.scripts[name] === 'string' ? manifest.scripts[name].trim().replace(/\s+/gu, ' ') : undefined; }
+function sameCommand(left: ApplicationCommand, right: ApplicationCommand): boolean { return left.executable === right.executable && left.args.length === right.args.length && left.args.every((argument, index) => argument === right.args[index]); }
 
 /** Discovers direct child code repositories without treating a parent folder as a Project itself. */
 export async function scanProjectDirectory(rootInput: string, includePm2 = true): Promise<ImportPreview[]> {
@@ -247,6 +335,17 @@ export function parseCommandOptions(value: unknown): ApplicationCommandOption[] 
   const options = value.map((item) => isRecord(item) && typeof item.name === 'string' && item.name ? { name: item.name, command: parseApplicationCommand(item.command) } : null);
   if (options.some((option) => option === null || option.command === null)) return null;
   return options.map((option) => ({ name: option!.name, command: option!.command! }));
+}
+
+export function parseServiceProfile(value: unknown): ServiceProfile | null {
+  if (!isRecord(value) || typeof value.profileId !== 'string' || !value.profileId || typeof value.id !== 'string' || !value.id || typeof value.serviceName !== 'string' || !value.serviceName || typeof value.cwd !== 'string' || !isAbsolute(value.cwd)) return null;
+  const command = parseApplicationCommand(value.command);
+  const restartPolicy = parseRestartPolicy(value.restartPolicy);
+  const healthCheck = parseHealthCheck(value.healthCheck);
+  const defaultPort = value.defaultPort === undefined ? undefined : isPort(value.defaultPort) ? value.defaultPort : null;
+  const changeRules = parseChangeRules(value.changeRules);
+  if (!command || !restartPolicy || defaultPort === null || !changeRules || (value.healthCheck !== undefined && !healthCheck)) return null;
+  return { profileId: value.profileId, id: value.id, serviceName: value.serviceName, cwd: resolve(value.cwd), command, ...(defaultPort === undefined ? {} : { defaultPort }), ...(healthCheck ? { healthCheck } : {}), restartPolicy, changeRules };
 }
 
 export function parseProjectSettings(value: unknown): ProjectSettings | null {
@@ -343,5 +442,12 @@ async function assertDirectory(path: string): Promise<void> { if (!isAbsolute(pa
 function quoteArgument(value: string): string { return /[\s"']/u.test(value) ? JSON.stringify(value) : value; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function isPositiveInteger(value: unknown): value is number { return typeof value === 'number' && Number.isInteger(value) && value > 0; }
+function isPort(value: unknown): value is number { return isPositiveInteger(value) && value <= 65_535; }
 function isNonNegativeInteger(value: unknown): value is number { return typeof value === 'number' && Number.isInteger(value) && value >= 0; }
 function numberOr(value: unknown, fallback: number): number { return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : fallback; }
+function parseHealthCheck(value: unknown): ServiceHealthCheck | null { return isRecord(value) && value.type === 'http' && typeof value.path === 'string' && value.path.startsWith('/') ? { type: 'http', path: value.path } : null; }
+function parseChangeRules(value: unknown): ServiceChangeRule[] | null {
+  if (!Array.isArray(value)) return null;
+  const rules = value.map((item) => isRecord(item) && typeof item.id === 'string' && item.id && typeof item.label === 'string' && typeof item.explanation === 'string' && ['hot-reload', 'auto-restart', 'manual-restart', 'rebuild', 'migration', 'confirmation-required'].includes(String(item.impact)) && ['runtime-verified', 'source-inspected', 'unverified'].includes(String(item.evidence)) ? { id: item.id, label: item.label, explanation: item.explanation, impact: item.impact as ChangeImpact, evidence: item.evidence as ProfileEvidence } : null);
+  return rules.some((rule) => rule === null) ? null : rules as ServiceChangeRule[];
+}

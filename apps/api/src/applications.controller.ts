@@ -13,6 +13,7 @@ export class ApplicationsController {
   @Post(':id/start') async start(@Param('id') id: string) { return publicApplication(await this.runtime.start(id)); }
   @Post(':id/stop') async stop(@Param('id') id: string) { return publicApplication(await this.runtime.stop(id)); }
   @Post(':id/restart') async restart(@Param('id') id: string) { return publicApplication(await this.runtime.restart(id)); }
+  @Post(':id/adopt') adopt(@Param('id') id: string) { return publicApplication(this.runtime.adoptExternal(id)); }
   @Post(':id/log-capture/inspector') async enableInspectorLogCapture(@Param('id') id: string) { return publicApplication(await this.runtime.enableInspectorLogCapture(id)); }
   @Get(':id/logs/history') async history(@Param('id') id: string, @Query('stream') stream = 'combined', @Query('before') before?: string, @Query('limit') limit?: string) {
     if (stream !== 'stdout' && stream !== 'stderr' && stream !== 'combined') throw new BadRequestException('stream 必须是 stdout、stderr 或 combined。');

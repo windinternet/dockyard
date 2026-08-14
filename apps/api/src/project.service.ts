@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { relative, resolve } from 'node:path';
-import { parseApplicationCommand, parseCommandOptions, parseLogPolicy, parseProjectSettings, parseRestartPolicy, scanProject, scanProjectDirectory, type ImportPreview, type ImportPreviewApplication, type ProjectSettings } from '@dockyard/core';
+import { parseApplicationCommand, parseCommandOptions, parseLogPolicy, parseProjectSettings, parseRestartPolicy, parseServiceProfile, scanProject, scanProjectDirectory, type ImportPreview, type ImportPreviewApplication, type ProjectSettings } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
 import { RuntimeService } from './runtime.service.js';
 
@@ -75,9 +75,10 @@ export class ProjectService {
 function parseCandidate(value: unknown): ImportPreviewApplication | null {
   const body = record(value);
   if (!body || (body.origin !== 'package-script' && body.origin !== 'pm2-ecosystem') || typeof body.key !== 'string' || typeof body.name !== 'string' || typeof body.cwd !== 'string') return null;
-  const command = parseApplicationCommand(body.command); const commandOptions = parseCommandOptions(body.commandOptions); const selectedCommand = typeof body.selectedCommand === 'string' ? body.selectedCommand : null; const restartPolicy = parseRestartPolicy(body.restartPolicy); const logPolicy = parseLogPolicy(body.logPolicy);
-  if (!command || !commandOptions || !selectedCommand || !commandOptions.some((option) => option.name === selectedCommand) || !restartPolicy || !logPolicy) return null;
-  return { key: body.key, origin: body.origin, name: body.name, cwd: body.cwd, command, commandOptions, selectedCommand, restartPolicy, logPolicy, warnings: [] };
+  const command = parseApplicationCommand(body.command); const commandOptions = parseCommandOptions(body.commandOptions); const selectedCommand = typeof body.selectedCommand === 'string' ? body.selectedCommand : null; const restartPolicy = parseRestartPolicy(body.restartPolicy); const logPolicy = parseLogPolicy(body.logPolicy); const serviceProfile = body.serviceProfile === undefined ? undefined : parseServiceProfile(body.serviceProfile);
+  if (!command || !commandOptions || !selectedCommand || !commandOptions.some((option) => option.name === selectedCommand) || !restartPolicy || !logPolicy || (body.serviceProfile !== undefined && !serviceProfile)) return null;
+  if (serviceProfile && (resolve(serviceProfile.cwd) !== resolve(body.cwd) || serviceProfile.command.executable !== command.executable || serviceProfile.command.args.join('\0') !== command.args.join('\0'))) return null;
+  return { key: body.key, origin: body.origin, name: body.name, cwd: body.cwd, command, commandOptions, selectedCommand, restartPolicy, logPolicy, ...(serviceProfile ? { serviceProfile } : {}), warnings: [] };
 }
 function record(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function outside(root: string, candidate: string): boolean { const path = relative(root, resolve(candidate)); return path === '..' || path.startsWith(`..${'/'}`) || path.startsWith(`..${'\\'}`); }

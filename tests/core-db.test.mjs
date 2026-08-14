@@ -9,17 +9,26 @@ import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanPro
 import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { ProjectService } from '../apps/api/dist/project.service.js';
-import { externalLogFilesFromDescriptors, logCaptureStatusFor, matchingProcesses, parseProcessTable, readLogTail, RuntimeService, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
+import { externalLogFilesFromDescriptors, logCaptureStatusFor, matchingProcesses, parseProcessTable, probeServiceHealth, readLogTail, RuntimeService, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
 import { terminateChildProcess } from '../apps/api/dist/runtime.service.js';
 import { ApplicationsController, runtimeEvent } from '../apps/api/dist/applications.controller.js';
 import { DatabaseSync } from 'node:sqlite';
 
 const fixture = resolve('tests/fixtures/scannable');
 const monorepoFixture = resolve('tests/fixtures/monorepo');
+const dokployFixture = resolve('tests/fixtures/dokploy');
 
 test('runtime SSE emits named events so subscribed UI handlers receive metrics', () => {
   const event = runtimeEvent({ type: 'metric', metric: { applicationId: 'app-1', sampledAt: '2026-08-11T00:00:00.000Z', pid: 1, cpuPercent: 0, uptimeMs: 1, restartCount: 0, rssBytes: 1 } });
   assert.equal(event.type, 'metric');
+});
+
+test('service health keeps a reachable listener and a successful HTTP probe as separate facts', async () => {
+  const requests = [];
+  const request = async (url) => { requests.push(url); return { ok: true }; };
+  assert.deepEqual(await probeServiceHealth({ defaultPort: 4318, healthCheck: { type: 'http', path: '/ready' } }, [4318], request), { portReachability: 'reachable', healthStatus: 'healthy' });
+  assert.deepEqual(requests, ['http://127.0.0.1:4318/ready']);
+  assert.deepEqual(await probeServiceHealth({ defaultPort: 4318, healthCheck: { type: 'http', path: '/ready' } }, [], request), { portReachability: 'unreachable', healthStatus: 'unknown' });
 });
 
 test('managed processes that ignore SIGTERM are force-stopped with SIGKILL after the grace period', { skip: process.platform === 'win32' }, async () => {
@@ -72,6 +81,39 @@ test('scanner imports each runnable workspace module once and excludes workspace
   assert.equal(preview.applications[0]?.selectedCommand, 'dev');
   assert.deepEqual(preview.projectEntrypointOptions.map((option) => option.name), ['dev']);
   assert.equal(preview.selectedProjectEntrypoint, 'dev');
+});
+
+test('scanner exposes the strict Dokploy service profile and keeps uncertain changes conservative', async () => {
+  const preview = await scanProject(dokployFixture, false);
+  assert.equal(preview.compatibilityProfile?.id, 'dokploy');
+  assert.deepEqual(preview.compatibilityProfile?.services.map((service) => [service.id, service.cwd, service.defaultPort, service.changeRules.map((rule) => [rule.id, rule.impact, rule.evidence])]), [
+    ['dashboard', join(dokployFixture, 'apps/dokploy'), 3000, [['next-ui', 'hot-reload', 'source-inspected'], ['custom-server', 'manual-restart', 'runtime-verified'], ['shared-runtime', 'confirmation-required', 'unverified']]],
+    ['api', join(dokployFixture, 'apps/api'), 4000, [['service-source', 'auto-restart', 'runtime-verified'], ['shared-runtime', 'confirmation-required', 'unverified']]],
+    ['schedules', join(dokployFixture, 'apps/schedules'), 4001, [['service-source', 'auto-restart', 'runtime-verified'], ['shared-runtime', 'confirmation-required', 'unverified']]],
+  ]);
+  assert.equal(preview.applications.find((application) => application.name === 'dokploy')?.serviceProfile?.healthCheck?.path, '/');
+});
+
+test('an imported compatibility service profile survives a database round trip', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-profile-persistence-test-'));
+  const database = await DockyardDatabase.open(new PathResolver(state));
+  const preview = await scanProject(dokployFixture, false);
+  const imported = database.importProject(preview.root, preview.projectName, preview.applications, preview.projectEntrypointOptions, preview.selectedProjectEntrypoint);
+  const dashboard = imported.applications.find((application) => application.name === 'dokploy');
+  assert.deepEqual(database.getApplication(dashboard.id)?.serviceProfile?.changeRules.map((rule) => rule.impact), ['hot-reload', 'manual-restart', 'confirmation-required']);
+  database.close();
+});
+
+test('changing a profiled service command clears its no-longer-accurate profile', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-profile-command-test-'));
+  const database = await DockyardDatabase.open(new PathResolver(state));
+  const preview = await scanProject(dokployFixture, false);
+  const imported = database.importProject(preview.root, preview.projectName, preview.applications);
+  const dashboard = imported.applications.find((application) => application.name === 'dokploy');
+  const replacement = { ...dashboard, commandOptions: [...dashboard.commandOptions, { name: 'start', command: { executable: 'pnpm', args: ['run', 'start'] } }] };
+  database.importProject(preview.root, preview.projectName, imported.applications.map((application) => application.id === dashboard.id ? replacement : application));
+  assert.equal(database.updateApplicationCommand(dashboard.id, 'start').serviceProfile, undefined);
+  database.close();
 });
 
 test('project startup preferences preserve a selected workspace root entrypoint', async () => {
@@ -221,6 +263,25 @@ test('runtime follows file-backed logs from an externally started process', { sk
     assert.equal(tail[0]?.at, (await import('node:fs/promises').then(({ stat }) => stat(join(state, 'dockyard-state', 'logs', imported.project.id, application.id, 'stdout.log')))).mtime.toISOString());
   } finally {
     remove();
+    child.kill('SIGTERM');
+    runtime.onModuleDestroy();
+    database.close();
+  }
+});
+
+test('an external process remains observation-only until the user explicitly adopts recovery management', { skip: process.platform === 'win32' }, async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-external-adoption-test-'));
+  const database = await DockyardDatabase.open(new PathResolver(join(state, 'dockyard-state')));
+  const preview = await scanProject(fixture, false);
+  const imported = database.importProject(state, 'external-adoption', [{ ...preview.applications[0], cwd: state }]);
+  const application = imported.applications[0];
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1_000)'], { cwd: state, stdio: 'ignore' });
+  const runtime = new RuntimeService({ db: database });
+  try {
+    await runtime.adoptExternalRuntime(application, undefined, { pid: child.pid, startedAt: Date.now(), listeningPorts: [] });
+    assert.equal(runtime.application(application.id).externalRuntimeManagement, 'observe');
+    assert.equal(runtime.adoptExternal(application.id).externalRuntimeManagement, 'adopted');
+  } finally {
     child.kill('SIGTERM');
     runtime.onModuleDestroy();
     database.close();

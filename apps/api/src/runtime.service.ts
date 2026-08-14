@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { platform } from 'node:os';
 import { promisify } from 'node:util';
-import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, type Application, type ApplicationStatus, type LogCaptureStatus, type LogStream, type MetricRollup, type Project, type ProjectSettings, type RuntimeOwnership } from '@dockyard/core';
+import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, type Application, type ApplicationStatus, type LogCaptureStatus, type LogStream, type MetricRollup, type PortReachability, type Project, type ProjectSettings, type RuntimeOwnership, type ServiceHealthStatus, type ServiceProfile } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
 import { startInspectorLogCapture, type InspectorLogCapture } from './inspector-log-capture.js';
 
@@ -21,6 +21,8 @@ interface Runtime {
   retries: number;
   manuallyStopped: boolean;
   listeningPorts: readonly number[];
+  portReachability: PortReachability;
+  healthStatus: ServiceHealthStatus;
   externalLogs?: Partial<Record<LogStream, ExternalLogCursor>>;
   inspectorCapture?: InspectorLogCapture;
   logBuffers: Partial<Record<LogStream, string>>;
@@ -84,6 +86,15 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
 
   async start(id: string): Promise<Application> { const application = this.application(id); if (this.runtimes.has(id)) return application; this.stoppingProjects.delete(application.projectId); this.cancelRetry(id); this.terminalStatuses.delete(id); this.launch(application, 0); return this.application(id); }
   async restart(id: string): Promise<Application> { await this.stop(id); return this.start(id); }
+  adoptExternal(id: string): Application {
+    const runtime = this.runtimes.get(id);
+    if (!runtime || runtime.ownership !== 'external' || runtime.pid === null) throw new RequestTimeoutException('只有当前已验证的外部运行进程可以采用。');
+    const application = this.database.db.updateExternalRuntimeManagement(id, 'adopted');
+    runtime.application = application;
+    this.database.db.recordEvent({ applicationId: id, type: 'external-adopted', detail: { pid: runtime.pid, source: 'external', recovery: 'enabled-after-exit' } });
+    this.emitApplication(id);
+    return this.application(id);
+  }
   async enableInspectorLogCapture(id: string): Promise<Application> {
     const runtime = this.runtimes.get(id);
     if (!runtime || runtime.ownership !== 'external' || !runtime.pid) throw new RequestTimeoutException('仅运行中的外部 Node 应用可启用 Inspector 日志捕获。');
@@ -157,7 +168,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
 
   private launch(application: Application, retries: number): void {
     const child = spawn(application.command.executable, [...application.command.args], { cwd: application.cwd, shell: false, detached: platform() !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], env: inheritedEnvironment() });
-    const runtime: Runtime = { child, pid: child.pid ?? null, ownership: 'dockyard', application, status: 'running', startedAt: Date.now(), retries, manuallyStopped: false, listeningPorts: [], logBuffers: {} };
+    const runtime: Runtime = { child, pid: child.pid ?? null, ownership: 'dockyard', application, status: 'running', startedAt: Date.now(), retries, manuallyStopped: false, listeningPorts: [], ...unobservedServiceState(application.serviceProfile), logBuffers: {} };
     this.runtimes.set(application.id, runtime);
     this.emitApplication(application.id);
     const logDirectory = this.database.db.pathResolver.logDirectory(application.projectId, application.id); mkdirSync(logDirectory, { recursive: true });
@@ -273,8 +284,9 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     this.database.db.recordEvent({ applicationId, type: 'exited', detail: { code, signal, error, runtimeMs: elapsed, source: runtime.ownership } });
     const failed = runtime.ownership === 'external' || code !== 0;
     const projectOwnsLifecycle = this.projectRuntimes.has(application.projectId) || this.projectRetryTimers.has(application.projectId) || this.stoppingProjects.has(application.projectId);
-    const shouldRetry = !projectOwnsLifecycle && !runtime.manuallyStopped && (application.restartPolicy.mode === 'always' || (application.restartPolicy.mode === 'on-failure' && failed));
-    if (!shouldRetry) { this.terminalStatuses.set(application.id, runtime.manuallyStopped || this.stoppingProjects.has(application.projectId) || code === 0 ? 'stopped' : 'crashed'); this.emitApplication(application.id); return; }
+    const externalRecoveryEnabled = runtime.ownership !== 'external' || application.externalRuntimeManagement === 'adopted';
+    const shouldRetry = externalRecoveryEnabled && !projectOwnsLifecycle && !runtime.manuallyStopped && (application.restartPolicy.mode === 'always' || (application.restartPolicy.mode === 'on-failure' && failed));
+    if (!shouldRetry) { this.terminalStatuses.set(application.id, runtime.manuallyStopped || this.stoppingProjects.has(application.projectId) || code === 0 || runtime.ownership === 'external' ? 'stopped' : 'crashed'); this.emitApplication(application.id); return; }
     if (elapsed >= application.restartPolicy.stableWindowMs) runtime.retries = 0;
     if (runtime.retries >= application.restartPolicy.maxRetries) { this.terminalStatuses.set(application.id, 'crashed'); this.database.db.recordEvent({ applicationId: application.id, type: 'crashed', detail: { reason: 'restart-budget-exhausted', retries: runtime.retries, source: runtime.ownership } }); this.emitApplication(application.id); return; }
     const delay = application.restartPolicy.retryDelayMs * 2 ** runtime.retries;
@@ -318,7 +330,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
       this.restartingProjects.delete(projectId);
     }
   }
-  private withStatus(application: Application): Application { const runtime = this.runtimes.get(application.id); return { ...application, status: runtime?.status ?? this.terminalStatuses.get(application.id) ?? 'stopped', pid: runtime?.pid ?? null, runtimeOwnership: runtime?.ownership ?? null, logCaptureStatus: logCaptureStatusFor(runtime), listeningPorts: runtime?.listeningPorts ?? [] }; }
+  private withStatus(application: Application): Application { const runtime = this.runtimes.get(application.id); return { ...application, status: runtime?.status ?? this.terminalStatuses.get(application.id) ?? 'stopped', pid: runtime?.pid ?? null, runtimeOwnership: runtime?.ownership ?? null, logCaptureStatus: logCaptureStatusFor(runtime), listeningPorts: runtime?.listeningPorts ?? [], portReachability: runtime?.portReachability ?? application.portReachability, healthStatus: runtime?.healthStatus ?? application.healthStatus }; }
   private withProjectRuntime(project: Project): Project { const runtime = this.projectRuntimes.get(project.id); return { ...project, runtime: { status: runtime?.status ?? this.projectTerminalStatuses.get(project.id) ?? 'stopped', pid: runtime?.child.pid ?? null, ownership: runtime ? 'dockyard' : null, selectedEntrypoint: project.settings.selectedProjectEntrypoint } }; }
   private project(id: string) { const project = this.database.db.listProjects().find((item) => item.id === id); if (!project) throw new NotFoundException('项目不存在。'); return this.withProjectRuntime(project); }
   private entrypointFor(project: Project) { return project.settings.selectedProjectEntrypoint === null ? null : project.settings.projectEntrypointOptions.find((option) => option.name === project.settings.selectedProjectEntrypoint) ?? null; }
@@ -355,12 +367,13 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
           const nextPorts = observed?.listeningPorts ?? [];
           const nextPid = observed?.pid ?? runtime.child?.pid ?? runtime.pid;
           const nextStartedAt = observed?.startedAt ?? runtime.startedAt;
-          if (runtime.pid !== nextPid || runtime.startedAt !== nextStartedAt || !samePorts(runtime.listeningPorts, nextPorts)) {
+          const changed = runtime.pid !== nextPid || runtime.startedAt !== nextStartedAt || !samePorts(runtime.listeningPorts, nextPorts);
+          if (changed) {
             runtime.pid = nextPid;
             runtime.startedAt = nextStartedAt;
             runtime.listeningPorts = nextPorts;
-            this.emitApplication(application.id);
           }
+          if (changed || await this.refreshServiceObservation(runtime)) this.emitApplication(application.id);
           continue;
         }
         if (observed) await this.adoptExternalRuntime(application, runtime, observed);
@@ -372,13 +385,14 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   private async adoptExternalRuntime(application: Application, runtime: Runtime | undefined, observed: ObservedProcess): Promise<void> {
     if (!runtime) {
       this.cancelRetry(application.id);
-      const adopted: Runtime = { pid: observed.pid, ownership: 'external', application, status: 'running', startedAt: observed.startedAt, retries: 0, manuallyStopped: false, listeningPorts: observed.listeningPorts, logBuffers: {}, externalLogs: await externalLogCursors(observed.pid) };
+      const adopted: Runtime = { pid: observed.pid, ownership: 'external', application, status: 'running', startedAt: observed.startedAt, retries: 0, manuallyStopped: false, listeningPorts: observed.listeningPorts, ...unobservedServiceState(application.serviceProfile), logBuffers: {}, externalLogs: await externalLogCursors(observed.pid) };
       this.runtimes.set(application.id, adopted);
       this.terminalStatuses.delete(application.id);
       this.database.db.recordEvent({ applicationId: application.id, type: 'started', detail: { pid: observed.pid, listeningPorts: observed.listeningPorts, source: 'external-discovery' } });
       const streams = Object.keys(adopted.externalLogs ?? {}) as LogStream[];
       this.database.db.recordEvent({ applicationId: application.id, type: streams.length ? 'external-log-following' : 'external-log-unavailable', detail: streams.length ? { streams, source: 'file-descriptor' } : { reason: 'stdout-stderr-not-file-backed' } });
       await this.collectExternalLogs(adopted);
+      await this.refreshServiceObservation(adopted);
       this.emitApplication(application.id);
       return;
     }
@@ -390,7 +404,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     runtime.status = 'running';
     if (changed) { runtime.inspectorCapture?.close(); delete runtime.inspectorCapture; runtime.externalLogs = await externalLogCursors(observed.pid); }
     await this.collectExternalLogs(runtime);
-    if (changed) this.emitApplication(application.id);
+    if (changed || await this.refreshServiceObservation(runtime)) this.emitApplication(application.id);
   }
 
   private async collectExternalLogs(runtime: Runtime): Promise<void> {
@@ -410,7 +424,15 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
     if (this.runtimes.get(applicationId) !== runtime) return;
     const metric: MetricRollup = { applicationId, sampledAt: new Date().toISOString(), pid: runtime.pid, cpuPercent: process?.cpuPercent ?? null, uptimeMs: Date.now() - runtime.startedAt, restartCount: runtime.retries, rssBytes: process?.rssBytes ?? null };
     this.database.db.recordMetric(metric, this.metricRetentionDays);
+    if (await this.refreshServiceObservation(runtime)) this.emitApplication(applicationId);
     this.updates.emit('update', { type: 'metric', metric } satisfies RuntimeUpdate);
+  }
+  private async refreshServiceObservation(runtime: Runtime): Promise<boolean> {
+    const next = await probeServiceHealth(runtime.application.serviceProfile, runtime.listeningPorts);
+    const changed = runtime.portReachability !== next.portReachability || runtime.healthStatus !== next.healthStatus;
+    runtime.portReachability = next.portReachability;
+    runtime.healthStatus = next.healthStatus;
+    return changed;
   }
   private async isCurrentExternalRuntime(runtime: Runtime): Promise<boolean> {
     const result = await listHostProcesses();
@@ -456,6 +478,21 @@ export function logCaptureStatusFor(runtime: Pick<Runtime, 'ownership' | 'extern
   if (runtime.ownership === 'dockyard') return 'streaming';
   if (runtime.inspectorCapture) return 'inspector';
   return Object.keys(runtime.externalLogs ?? {}).length ? 'file-backed' : 'unavailable';
+}
+
+/** Probes a declared local HTTP health endpoint without granting any lifecycle authority. */
+export async function probeServiceHealth(profile: Pick<ServiceProfile, 'defaultPort' | 'healthCheck'> | undefined, listeningPorts: readonly number[], request: (url: string) => Promise<Pick<Response, 'ok'>> = async (url) => await fetch(url, { signal: AbortSignal.timeout(1_000) })): Promise<{ portReachability: PortReachability; healthStatus: ServiceHealthStatus }> {
+  if (!profile?.defaultPort) return { portReachability: 'not-configured', healthStatus: 'not-configured' };
+  if (!listeningPorts.includes(profile.defaultPort)) return { portReachability: 'unreachable', healthStatus: profile.healthCheck ? 'unknown' : 'not-configured' };
+  if (!profile.healthCheck) return { portReachability: 'reachable', healthStatus: 'not-configured' };
+  try {
+    const response = await request(`http://127.0.0.1:${profile.defaultPort}${profile.healthCheck.path}`);
+    return { portReachability: 'reachable', healthStatus: response.ok ? 'healthy' : 'unhealthy' };
+  } catch { return { portReachability: 'reachable', healthStatus: 'unhealthy' }; }
+}
+
+function unobservedServiceState(profile: Application['serviceProfile']): Pick<Runtime, 'portReachability' | 'healthStatus'> {
+  return { portReachability: profile?.defaultPort ? 'unknown' : 'not-configured', healthStatus: profile?.healthCheck ? 'unknown' : 'not-configured' };
 }
 
 /** Reads the recent persisted tail so reconnecting SSE clients immediately receive useful context. */

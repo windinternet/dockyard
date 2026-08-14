@@ -1,0 +1,8 @@
+{
+  "name": "dokploy",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dokploy:dev": "pnpm --filter=dokploy run dev"
+  }
+}

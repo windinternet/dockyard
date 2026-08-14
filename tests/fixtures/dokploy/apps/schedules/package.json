@@ -1,0 +1,7 @@
+{
+  "name": "@dokploy/schedules",
+  "private": true,
+  "scripts": {
+    "dev": "PORT=4001 tsx watch src/index.ts"
+  }
+}

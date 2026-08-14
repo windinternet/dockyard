@@ -1,0 +1,7 @@
+{
+  "name": "dokploy",
+  "private": true,
+  "scripts": {
+    "dev": "tsx -r dotenv/config ./server/server.ts --project tsconfig.server.json"
+  }
+}

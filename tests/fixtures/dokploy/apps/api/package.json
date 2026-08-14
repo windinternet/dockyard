@@ -1,0 +1,7 @@
+{
+  "name": "@dokploy/api",
+  "private": true,
+  "scripts": {
+    "dev": "PORT=4000 tsx watch src/index.ts"
+  }
+}

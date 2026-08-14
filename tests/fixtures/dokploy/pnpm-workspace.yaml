@@ -1,0 +1,6 @@
+packages:
+  - "apps/api"
+  - "apps/dokploy"
+  - "apps/schedules"
+  - "packages/i18n"
+  - "packages/server"
