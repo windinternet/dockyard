@@ -57,6 +57,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@dockyard/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@douyinfe/semi-icons':
         specifier: ^2.75.1
         version: 2.102.0(react@19.2.8)

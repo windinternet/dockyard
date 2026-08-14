@@ -9,6 +9,7 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
+    "@dockyard/core": "workspace:*",
     "@douyinfe/semi-icons": "^2.75.1",
     "@douyinfe/semi-ui": "^2.75.1",
     "@visactor/react-vchart": "^2.1.5",

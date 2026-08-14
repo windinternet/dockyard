@@ -1,11 +1,12 @@
 import { BadRequestException, Body, Controller, Get, Header, Param, Patch, Post, Query, Sse } from '@nestjs/common';
-import { parseLogPolicy, parseRestartPolicy, redactCommandForDisplay, type Application } from '@dockyard/core';
+import { parseLogPolicy, parseRestartPolicy, redactCommandForDisplay, redactDisplayText, type Application } from '@dockyard/core';
 import { Observable } from 'rxjs';
 import { RuntimeService, type LogMessage, type RuntimeUpdate } from './runtime.service.js';
 @Controller('api/applications')
 export class ApplicationsController {
   constructor(private readonly runtime: RuntimeService) {}
   @Get() list() { return { applications: this.runtime.applications().map(publicApplication) }; }
+  @Get('discovered') unknownProcesses() { return { processes: this.runtime.unknownProcesses().map((process) => ({ ...process, command: redactDisplayText(process.command) })) }; }
   @Sse('stream') stream(): Observable<MessageEvent> { return new Observable((subscriber) => this.runtime.onUpdate((update) => subscriber.next(runtimeEvent(update)))); }
   @Get(':id') get(@Param('id') id: string) { return publicApplication(this.runtime.application(id)); }
   @Get(':id/events') events(@Param('id') id: string) { return { events: this.runtime.events(id) }; }
@@ -14,6 +15,11 @@ export class ApplicationsController {
   @Post(':id/stop') async stop(@Param('id') id: string) { return publicApplication(await this.runtime.stop(id)); }
   @Post(':id/restart') async restart(@Param('id') id: string) { return publicApplication(await this.runtime.restart(id)); }
   @Post(':id/adopt') adopt(@Param('id') id: string) { return publicApplication(this.runtime.adoptExternal(id)); }
+  @Post(':id/change-impact') changeImpact(@Param('id') id: string, @Body() body: unknown) {
+    const value = record(body);
+    if (!value || !Array.isArray(value.paths) || !value.paths.length || value.paths.length > 100 || !value.paths.every((path) => typeof path === 'string' && path && path.length <= 1_024)) throw new BadRequestException('paths 必须是 1 到 100 个相对文件路径。');
+    return { assessments: this.runtime.assessChanges(id, value.paths) };
+  }
   @Post(':id/log-capture/inspector') async enableInspectorLogCapture(@Param('id') id: string) { return publicApplication(await this.runtime.enableInspectorLogCapture(id)); }
   @Get(':id/logs/history') async history(@Param('id') id: string, @Query('stream') stream = 'combined', @Query('before') before?: string, @Query('limit') limit?: string) {
     if (stream !== 'stdout' && stream !== 'stderr' && stream !== 'combined') throw new BadRequestException('stream 必须是 stdout、stderr 或 combined。');

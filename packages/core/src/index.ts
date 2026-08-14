@@ -64,6 +64,8 @@ export interface ServiceHealthCheck {
 export interface ServiceChangeRule {
   id: string;
   label: string;
+  /** Project-relative glob patterns. A path without a matching rule is always confirmation-required. */
+  pathPatterns: readonly string[];
   impact: ChangeImpact;
   evidence: ProfileEvidence;
   explanation: string;
@@ -78,6 +80,8 @@ export interface ServiceProfile {
   command: ApplicationCommand;
   defaultPort?: number;
   healthCheck?: ServiceHealthCheck;
+  /** Fragments expected in the command line of the process created by this service command; empty means no safe fingerprint is known. */
+  processCommandHints: readonly string[];
   restartPolicy: RestartPolicy;
   changeRules: readonly ServiceChangeRule[];
 }
@@ -87,6 +91,14 @@ export interface CompatibilityProfile {
   name: string;
   evidence: ProfileEvidence;
   services: readonly ServiceProfile[];
+}
+
+export interface ChangeAssessment {
+  path: string;
+  impact: ChangeImpact;
+  evidence: ProfileEvidence;
+  ruleId?: string;
+  explanation: string;
 }
 
 export interface ProjectSettings {
@@ -207,7 +219,6 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
   await assertDirectory(root);
   const hasPnpmWorkspace = await pathExists(join(root, 'pnpm-workspace.yaml'));
   const manifests = await discoverPackageManifests(root, 3);
-  const compatibilityProfile = await detectCompatibilityProfile(root);
   const applications: ImportPreviewApplication[] = [];
   const warnings: Pm2ConversionWarning[] = [];
   let projectEntrypointOptions: ApplicationCommandOption[] = [];
@@ -226,10 +237,9 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
       .map(([name]) => ({ name, command: { executable: packageManagerFor(cwd), args: ['run', name] } }));
     if (!commandOptions.length) continue;
     const selected = commandOptions.find((option) => option.name === 'dev') ?? commandOptions.find((option) => option.name === 'start') ?? commandOptions[0]!;
-    const serviceProfile = compatibilityProfile?.services.find((service) => service.cwd === cwd && sameCommand(service.command, selected.command));
     applications.push({
       key: `script:${cwd}`, origin: 'package-script', name: manifestName(manifest, cwd), cwd,
-      command: selected.command, commandOptions, selectedCommand: selected.name, restartPolicy: { ...defaultRestartPolicy }, logPolicy: { ...defaultLogPolicy }, serviceProfile, warnings: []
+      command: selected.command, commandOptions, selectedCommand: selected.name, restartPolicy: { ...defaultRestartPolicy }, logPolicy: { ...defaultLogPolicy }, warnings: []
     });
   }
   if (includePm2) {
@@ -241,7 +251,7 @@ export async function scanProject(rootInput: string, includePm2 = true): Promise
     }
   }
   const selectedProjectEntrypoint = projectEntrypointOptions.find((option) => option.name === 'dev')?.name ?? projectEntrypointOptions.find((option) => /:dev$/iu.test(option.name))?.name ?? projectEntrypointOptions[0]?.name ?? null;
-  return { root, projectName: basename(root), projectEntrypointOptions, selectedProjectEntrypoint, applications: deduplicateCandidates(applications), compatibilityProfile, warnings };
+  return { root, projectName: basename(root), projectEntrypointOptions, selectedProjectEntrypoint, applications: deduplicateCandidates(applications), warnings };
 }
 
 /** A dev/start name alone is not enough: known build pipelines exit successfully after one run. */
@@ -252,43 +262,36 @@ function isProjectEntrypointScript(name: string, value: unknown): value is strin
   return typeof value === 'string' && (isRunnableScript(name, value) || /:(?:dev|start|serve)$/iu.test(name));
 }
 
-async function detectCompatibilityProfile(root: string): Promise<CompatibilityProfile | undefined> {
-  const [workspace, rootManifest, dashboardManifest, apiManifest, schedulesManifest, serverManifest, i18nManifest] = await Promise.all([
-    readFile(join(root, 'pnpm-workspace.yaml'), 'utf8').catch(() => null),
-    readPackageManifest(join(root, 'package.json')),
-    readPackageManifest(join(root, 'apps/dokploy/package.json')),
-    readPackageManifest(join(root, 'apps/api/package.json')),
-    readPackageManifest(join(root, 'apps/schedules/package.json')),
-    readPackageManifest(join(root, 'packages/server/package.json')),
-    readPackageManifest(join(root, 'packages/i18n/package.json')),
-  ]);
-  const expectedWorkspacePaths = ['apps/api', 'apps/dokploy', 'apps/schedules', 'packages/i18n', 'packages/server'];
-  const workspaceMatches = workspace !== null && expectedWorkspacePaths.every((path) => workspace.includes(`"${path}"`) || workspace.includes(`'${path}'`));
-  if (!workspaceMatches || rootManifest?.name !== 'dokploy' || dashboardManifest?.name !== 'dokploy' || apiManifest?.name !== '@dokploy/api' || schedulesManifest?.name !== '@dokploy/schedules' || serverManifest?.name !== '@dokploy/server' || i18nManifest?.name !== '@dokploy/i18n') return undefined;
-  if (scriptFor(dashboardManifest, 'dev') !== 'tsx -r dotenv/config ./server/server.ts --project tsconfig.server.json' || scriptFor(apiManifest, 'dev') !== 'PORT=4000 tsx watch src/index.ts' || scriptFor(schedulesManifest, 'dev') !== 'PORT=4001 tsx watch src/index.ts') return undefined;
-  const service = (id: string, serviceName: string, cwd: string, defaultPort: number, healthCheck: ServiceHealthCheck | undefined, changeRules: readonly ServiceChangeRule[]): ServiceProfile => ({ profileId: 'dokploy', id, serviceName, cwd: join(root, cwd), command: { executable: 'pnpm', args: ['run', 'dev'] }, defaultPort, ...(healthCheck ? { healthCheck } : {}), restartPolicy: { ...defaultRestartPolicy }, changeRules });
+/** Attaches an adapter-provided baseline only when it exactly matches a scanned application command. */
+export function withCompatibilityProfile(preview: ImportPreview, compatibilityProfile: CompatibilityProfile | undefined): ImportPreview {
+  if (!compatibilityProfile) return preview;
   return {
-    id: 'dokploy', name: 'Dokploy 开发运行画像', evidence: 'source-inspected', services: [
-      service('dashboard', 'Dokploy 主面板', 'apps/dokploy', 3000, { type: 'http', path: '/' }, [
-        { id: 'next-ui', label: 'Next 页面与组件', impact: 'hot-reload', evidence: 'source-inspected', explanation: '自定义开发 server 显式把 HMR WebSocket 交给 Next；尚未对完整 Dokploy 进程做运行验证。' },
-        { id: 'custom-server', label: '自定义 Node server、WebSocket 与启动初始化', impact: 'manual-restart', evidence: 'runtime-verified', explanation: '该开发命令使用 tsx 但没有 watch；Dokploy 锁定的 tsx 实验在文件变化后未重启。' },
-        { id: 'shared-runtime', label: '共享包、环境变量、依赖或数据库结构', impact: 'confirmation-required', evidence: 'unverified', explanation: '这些影响须以依赖图和实际运行结果确认，不能由静态画像猜测。' },
-      ]),
-      service('api', 'Dokploy 部署 API', 'apps/api', 4000, { type: 'http', path: '/' }, [
-        { id: 'service-source', label: 'API 服务源文件', impact: 'auto-restart', evidence: 'runtime-verified', explanation: '开发命令使用 tsx watch；Dokploy 锁定的 tsx 实验确认文件变化会重启受监控入口。' },
-        { id: 'shared-runtime', label: '共享包、环境变量、依赖或数据库结构', impact: 'confirmation-required', evidence: 'unverified', explanation: '这些影响须以依赖图和实际运行结果确认，不能由静态画像猜测。' },
-      ]),
-      service('schedules', 'Dokploy 计划服务', 'apps/schedules', 4001, { type: 'http', path: '/' }, [
-        { id: 'service-source', label: '计划服务源文件', impact: 'auto-restart', evidence: 'runtime-verified', explanation: '开发命令使用 tsx watch；Dokploy 锁定的 tsx 实验确认文件变化会重启受监控入口。' },
-        { id: 'shared-runtime', label: '共享包、环境变量、依赖或数据库结构', impact: 'confirmation-required', evidence: 'unverified', explanation: '这些影响须以依赖图和实际运行结果确认，不能由静态画像猜测。' },
-      ]),
-    ]
+    ...preview,
+    compatibilityProfile,
+    applications: preview.applications.map((application) => {
+      const serviceProfile = compatibilityProfile.services.find((service) => resolve(service.cwd) === resolve(application.cwd) && sameCommand(service.command, application.command));
+      return serviceProfile ? { ...application, serviceProfile } : application;
+    }),
   };
 }
-async function readPackageManifest(path: string): Promise<PackageManifest | null> { try { return await readJson<PackageManifest>(path); } catch { return null; } }
-/** Package scripts are shell text, so insignificant whitespace is normalized before an otherwise exact match. */
-function scriptFor(manifest: PackageManifest, name: string): string | undefined { return isRecord(manifest.scripts) && typeof manifest.scripts[name] === 'string' ? manifest.scripts[name].trim().replace(/\s+/gu, ' ') : undefined; }
+
+/** Resolves concrete paths without inferring a lifecycle action for an unmatched path. */
+export function assessServiceChanges(service: ServiceProfile, projectRoot: string, paths: readonly string[]): ChangeAssessment[] {
+  const root = resolve(projectRoot);
+  return paths.map((path) => {
+    const relativePath = relative(root, resolve(root, path)).replaceAll('\\', '/');
+    const rule = relativePath && !relativePath.startsWith('../') && !relativePath.startsWith('/') ? service.changeRules.find((candidate) => candidate.pathPatterns.some((pattern) => globMatches(pattern, relativePath))) : undefined;
+    return rule
+      ? { path, impact: rule.impact, evidence: rule.evidence, ruleId: rule.id, explanation: rule.explanation }
+      : { path, impact: 'confirmation-required', evidence: 'unverified', explanation: '该路径没有已验证的画像规则；请检查依赖图与运行结果后再决定是否重启、重建或迁移。' };
+  });
+}
+
 function sameCommand(left: ApplicationCommand, right: ApplicationCommand): boolean { return left.executable === right.executable && left.args.length === right.args.length && left.args.every((argument, index) => argument === right.args[index]); }
+function globMatches(pattern: string, path: string): boolean {
+  const expression = `^${pattern.replace(/[.+^${}()|[\]\\]/gu, '\\$&').replaceAll('**', '§').replaceAll('*', '[^/]*').replaceAll('§', '.*')}$`;
+  return new RegExp(expression, 'u').test(path);
+}
 
 /** Discovers direct child code repositories without treating a parent folder as a Project itself. */
 export async function scanProjectDirectory(rootInput: string, includePm2 = true): Promise<ImportPreview[]> {
@@ -343,9 +346,10 @@ export function parseServiceProfile(value: unknown): ServiceProfile | null {
   const restartPolicy = parseRestartPolicy(value.restartPolicy);
   const healthCheck = parseHealthCheck(value.healthCheck);
   const defaultPort = value.defaultPort === undefined ? undefined : isPort(value.defaultPort) ? value.defaultPort : null;
+  const processCommandHints = value.processCommandHints === undefined ? [] : Array.isArray(value.processCommandHints) && value.processCommandHints.every((hint) => typeof hint === 'string' && hint) ? value.processCommandHints : null;
   const changeRules = parseChangeRules(value.changeRules);
-  if (!command || !restartPolicy || defaultPort === null || !changeRules || (value.healthCheck !== undefined && !healthCheck)) return null;
-  return { profileId: value.profileId, id: value.id, serviceName: value.serviceName, cwd: resolve(value.cwd), command, ...(defaultPort === undefined ? {} : { defaultPort }), ...(healthCheck ? { healthCheck } : {}), restartPolicy, changeRules };
+  if (!command || !restartPolicy || defaultPort === null || !processCommandHints || !changeRules || (value.healthCheck !== undefined && !healthCheck)) return null;
+  return { profileId: value.profileId, id: value.id, serviceName: value.serviceName, cwd: resolve(value.cwd), command, ...(defaultPort === undefined ? {} : { defaultPort }), ...(healthCheck ? { healthCheck } : {}), processCommandHints, restartPolicy, changeRules };
 }
 
 export function parseProjectSettings(value: unknown): ProjectSettings | null {
@@ -448,6 +452,10 @@ function numberOr(value: unknown, fallback: number): number { return typeof valu
 function parseHealthCheck(value: unknown): ServiceHealthCheck | null { return isRecord(value) && value.type === 'http' && typeof value.path === 'string' && value.path.startsWith('/') ? { type: 'http', path: value.path } : null; }
 function parseChangeRules(value: unknown): ServiceChangeRule[] | null {
   if (!Array.isArray(value)) return null;
-  const rules = value.map((item) => isRecord(item) && typeof item.id === 'string' && item.id && typeof item.label === 'string' && typeof item.explanation === 'string' && ['hot-reload', 'auto-restart', 'manual-restart', 'rebuild', 'migration', 'confirmation-required'].includes(String(item.impact)) && ['runtime-verified', 'source-inspected', 'unverified'].includes(String(item.evidence)) ? { id: item.id, label: item.label, explanation: item.explanation, impact: item.impact as ChangeImpact, evidence: item.evidence as ProfileEvidence } : null);
+  const rules = value.map((item) => {
+    if (!isRecord(item) || typeof item.id !== 'string' || !item.id || typeof item.label !== 'string' || typeof item.explanation !== 'string' || !['hot-reload', 'auto-restart', 'manual-restart', 'rebuild', 'migration', 'confirmation-required'].includes(String(item.impact)) || !['runtime-verified', 'source-inspected', 'unverified'].includes(String(item.evidence))) return null;
+    const pathPatterns = item.pathPatterns === undefined ? [] : Array.isArray(item.pathPatterns) && item.pathPatterns.every((pattern) => typeof pattern === 'string' && pattern && !pattern.startsWith('/') && !pattern.includes('..')) ? item.pathPatterns : null;
+    return pathPatterns === null ? null : { id: item.id, label: item.label, pathPatterns, explanation: item.explanation, impact: item.impact as ChangeImpact, evidence: item.evidence as ProfileEvidence };
+  });
   return rules.some((rule) => rule === null) ? null : rules as ServiceChangeRule[];
 }

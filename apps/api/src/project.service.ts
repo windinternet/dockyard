@@ -1,7 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { relative, resolve } from 'node:path';
-import { parseApplicationCommand, parseCommandOptions, parseLogPolicy, parseProjectSettings, parseRestartPolicy, parseServiceProfile, scanProject, scanProjectDirectory, type ImportPreview, type ImportPreviewApplication, type ProjectSettings } from '@dockyard/core';
+import { parseApplicationCommand, parseCommandOptions, parseLogPolicy, parseProjectSettings, parseRestartPolicy, scanProject, scanProjectDirectory, withCompatibilityProfile, type ImportPreview, type ImportPreviewApplication, type ProjectSettings } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
+import { detectDokployCompatibilityProfile } from './dokploy-compatibility-profile.js';
 import { RuntimeService } from './runtime.service.js';
 
 @Injectable()
@@ -12,7 +13,7 @@ export class ProjectService {
     if (!body || typeof body.path !== 'string') throw new BadRequestException('path 必须是绝对目录路径。');
     if (body.includePm2 !== undefined && typeof body.includePm2 !== 'boolean') throw new BadRequestException('includePm2 必须是布尔值。');
     try {
-      return this.preview(await scanProject(body.path, body.includePm2 !== false));
+      return this.preview(await this.profile(await scanProject(body.path, body.includePm2 !== false)));
     } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法扫描项目。'); }
   }
   async scanDirectory(input: unknown) {
@@ -22,10 +23,10 @@ export class ProjectService {
     try {
       const root = resolve(body.path);
       const projects = await scanProjectDirectory(root, body.includePm2 !== false);
-      return { root, projects: projects.map((project) => this.preview(project)) };
+      return { root, projects: (await Promise.all(projects.map(async (project) => this.profile(project)))).map((project) => this.preview(project)) };
     } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法扫描项目目录。'); }
   }
-  import(input: unknown) {
+  async import(input: unknown) {
     const body = record(input);
     if (!body || typeof body.path !== 'string' || typeof body.name !== 'string' || !Array.isArray(body.applications)) throw new BadRequestException('导入请求无效。');
     const candidates = body.applications.map(parseCandidate);
@@ -35,24 +36,25 @@ export class ProjectService {
     if (!projectEntrypointOptions || selectedProjectEntrypoint === undefined || (selectedProjectEntrypoint !== null && !projectEntrypointOptions.some((option) => option.name === selectedProjectEntrypoint))) throw new BadRequestException('项目级启动入口无效。');
     const root = resolve(body.path);
     if ((candidates as ImportPreviewApplication[]).some((candidate) => outside(root, candidate.cwd))) throw new BadRequestException('应用工作目录必须位于导入项目内。');
+    const trustedCandidates = withCompatibilityProfile({ root, projectName: body.name, projectEntrypointOptions, selectedProjectEntrypoint, applications: candidates as ImportPreviewApplication[], warnings: [] }, await detectDokployCompatibilityProfile(root)).applications;
     const project = this.database.db.listProjects().find((item) => item.path === root);
     if (project) {
-      const stale = staleApplicationsFor(this.database.db.listApplications(project.id), candidates as ImportPreviewApplication[]);
+      const stale = staleApplicationsFor(this.database.db.listApplications(project.id), trustedCandidates);
       if (stale.length && body.replaceStale !== true) throw new BadRequestException('检测到过时的脚本级应用记录；请在导入预览中明确确认替换。');
       if (stale.some((application) => this.runtime.application(application.id).status === 'running')) throw new BadRequestException('请先停止过时的应用记录，再确认替换。');
       if (body.replaceStale === true) this.database.db.removeApplications(stale.map((application) => application.id));
     }
-    return this.database.db.importProject(root, body.name, candidates as ImportPreviewApplication[], projectEntrypointOptions, selectedProjectEntrypoint);
+    return this.database.db.importProject(root, body.name, trustedCandidates, projectEntrypointOptions, selectedProjectEntrypoint);
   }
-  importMany(input: unknown) {
+  async importMany(input: unknown) {
     const body = record(input);
     if (!body || typeof body.root !== 'string' || !Array.isArray(body.projects)) throw new BadRequestException('批量导入请求无效。');
     const root = resolve(body.root);
-    return { projects: body.projects.map((project) => {
+    return { projects: await Promise.all(body.projects.map(async (project) => {
       const candidate = record(project);
       if (!candidate || typeof candidate.path !== 'string' || !directChild(root, candidate.path)) throw new BadRequestException('批量导入项目必须是所选目录的直接子目录。');
-      return this.import(candidate);
-    }) };
+      return await this.import(candidate);
+    })) };
   }
   list() { return this.runtime.projects(); }
   async start(id: string) { return { applications: await this.runtime.startProject(id) }; }
@@ -66,19 +68,19 @@ export class ProjectService {
     return this.runtime.updateProjectSettings(id, settings as ProjectSettings);
   }
   async remove(id: string) { await this.runtime.deleteProject(id); return { deleted: true }; }
+  private async profile(preview: ImportPreview): Promise<ImportPreview> { return withCompatibilityProfile(preview, await detectDokployCompatibilityProfile(preview.root)); }
   private preview(preview: ImportPreview) {
     const project = this.database.db.listProjects().find((item) => item.path === preview.root);
     const staleApplications = project ? staleApplicationsFor(this.database.db.listApplications(project.id), preview.applications).map((application) => ({ id: application.id, name: application.name, cwd: application.cwd })) : [];
-    return { project: { path: preview.root, name: preview.projectName, entrypointOptions: preview.projectEntrypointOptions, selectedEntrypoint: preview.selectedProjectEntrypoint }, applications: preview.applications, warnings: preview.warnings, staleApplications };
+    return { project: { path: preview.root, name: preview.projectName, entrypointOptions: preview.projectEntrypointOptions, selectedEntrypoint: preview.selectedProjectEntrypoint }, applications: preview.applications, compatibilityProfile: preview.compatibilityProfile, warnings: preview.warnings, staleApplications };
   }
 }
 function parseCandidate(value: unknown): ImportPreviewApplication | null {
   const body = record(value);
   if (!body || (body.origin !== 'package-script' && body.origin !== 'pm2-ecosystem') || typeof body.key !== 'string' || typeof body.name !== 'string' || typeof body.cwd !== 'string') return null;
-  const command = parseApplicationCommand(body.command); const commandOptions = parseCommandOptions(body.commandOptions); const selectedCommand = typeof body.selectedCommand === 'string' ? body.selectedCommand : null; const restartPolicy = parseRestartPolicy(body.restartPolicy); const logPolicy = parseLogPolicy(body.logPolicy); const serviceProfile = body.serviceProfile === undefined ? undefined : parseServiceProfile(body.serviceProfile);
-  if (!command || !commandOptions || !selectedCommand || !commandOptions.some((option) => option.name === selectedCommand) || !restartPolicy || !logPolicy || (body.serviceProfile !== undefined && !serviceProfile)) return null;
-  if (serviceProfile && (resolve(serviceProfile.cwd) !== resolve(body.cwd) || serviceProfile.command.executable !== command.executable || serviceProfile.command.args.join('\0') !== command.args.join('\0'))) return null;
-  return { key: body.key, origin: body.origin, name: body.name, cwd: body.cwd, command, commandOptions, selectedCommand, restartPolicy, logPolicy, ...(serviceProfile ? { serviceProfile } : {}), warnings: [] };
+  const command = parseApplicationCommand(body.command); const commandOptions = parseCommandOptions(body.commandOptions); const selectedCommand = typeof body.selectedCommand === 'string' ? body.selectedCommand : null; const restartPolicy = parseRestartPolicy(body.restartPolicy); const logPolicy = parseLogPolicy(body.logPolicy);
+  if (!command || !commandOptions || !selectedCommand || !commandOptions.some((option) => option.name === selectedCommand) || !restartPolicy || !logPolicy) return null;
+  return { key: body.key, origin: body.origin, name: body.name, cwd: body.cwd, command, commandOptions, selectedCommand, restartPolicy, logPolicy, warnings: [] };
 }
 function record(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function outside(root: string, candidate: string): boolean { const path = relative(root, resolve(candidate)); return path === '..' || path.startsWith(`..${'/'}`) || path.startsWith(`..${'\\'}`); }

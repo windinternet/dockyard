@@ -5,10 +5,11 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanProject } from '../packages/core/dist/index.js';
+import { assessServiceChanges, parseServiceProfile, redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanProject, withCompatibilityProfile } from '../packages/core/dist/index.js';
 import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { ProjectService } from '../apps/api/dist/project.service.js';
+import { detectDokployCompatibilityProfile, parseWorkspacePackagePaths } from '../apps/api/dist/dokploy-compatibility-profile.js';
 import { externalLogFilesFromDescriptors, logCaptureStatusFor, matchingProcesses, parseProcessTable, probeServiceHealth, readLogTail, RuntimeService, sameProcessIdentity, selectObservedProcess } from '../apps/api/dist/runtime.service.js';
 import { terminateChildProcess } from '../apps/api/dist/runtime.service.js';
 import { ApplicationsController, runtimeEvent } from '../apps/api/dist/applications.controller.js';
@@ -17,6 +18,7 @@ import { DatabaseSync } from 'node:sqlite';
 const fixture = resolve('tests/fixtures/scannable');
 const monorepoFixture = resolve('tests/fixtures/monorepo');
 const dokployFixture = resolve('tests/fixtures/dokploy');
+async function profiledDokployPreview() { return withCompatibilityProfile(await scanProject(dokployFixture, false), await detectDokployCompatibilityProfile(dokployFixture)); }
 
 test('runtime SSE emits named events so subscribed UI handlers receive metrics', () => {
   const event = runtimeEvent({ type: 'metric', metric: { applicationId: 'app-1', sampledAt: '2026-08-11T00:00:00.000Z', pid: 1, cpuPercent: 0, uptimeMs: 1, restartCount: 0, rssBytes: 1 } });
@@ -84,30 +86,74 @@ test('scanner imports each runnable workspace module once and excludes workspace
 });
 
 test('scanner exposes the strict Dokploy service profile and keeps uncertain changes conservative', async () => {
-  const preview = await scanProject(dokployFixture, false);
+  const preview = await profiledDokployPreview();
   assert.equal(preview.compatibilityProfile?.id, 'dokploy');
   assert.deepEqual(preview.compatibilityProfile?.services.map((service) => [service.id, service.cwd, service.defaultPort, service.changeRules.map((rule) => [rule.id, rule.impact, rule.evidence])]), [
     ['dashboard', join(dokployFixture, 'apps/dokploy'), 3000, [['next-ui', 'hot-reload', 'source-inspected'], ['custom-server', 'manual-restart', 'runtime-verified'], ['shared-runtime', 'confirmation-required', 'unverified']]],
     ['api', join(dokployFixture, 'apps/api'), 4000, [['service-source', 'auto-restart', 'runtime-verified'], ['shared-runtime', 'confirmation-required', 'unverified']]],
     ['schedules', join(dokployFixture, 'apps/schedules'), 4001, [['service-source', 'auto-restart', 'runtime-verified'], ['shared-runtime', 'confirmation-required', 'unverified']]],
   ]);
-  assert.equal(preview.applications.find((application) => application.name === 'dokploy')?.serviceProfile?.healthCheck?.path, '/');
+  assert.equal(preview.applications.find((application) => application.name === 'dokploy')?.serviceProfile?.healthCheck, undefined);
+});
+
+test('Dokploy adapter parses only the exact workspace package sequence and assesses unmatched files conservatively', async () => {
+  assert.deepEqual(parseWorkspacePackagePaths('packages:\n  - "apps/api"\n  - "apps/dokploy"\n'), ['apps/api', 'apps/dokploy']);
+  assert.equal(parseWorkspacePackagePaths('packages: ["apps/api"]'), null);
+  const profile = await detectDokployCompatibilityProfile(dokployFixture);
+  const api = profile?.services.find((service) => service.id === 'api');
+  assert.ok(api);
+  assert.deepEqual(assessServiceChanges(api, dokployFixture, ['apps/api/src/index.ts', 'packages/server/src/index.ts', 'README.md']).map((item) => [item.impact, item.ruleId]), [['auto-restart', 'service-source'], ['confirmation-required', 'shared-runtime'], ['confirmation-required', undefined]]);
 });
 
 test('an imported compatibility service profile survives a database round trip', async () => {
   const state = await mkdtemp(join(tmpdir(), 'dockyard-profile-persistence-test-'));
   const database = await DockyardDatabase.open(new PathResolver(state));
-  const preview = await scanProject(dokployFixture, false);
+  const preview = await profiledDokployPreview();
   const imported = database.importProject(preview.root, preview.projectName, preview.applications, preview.projectEntrypointOptions, preview.selectedProjectEntrypoint);
   const dashboard = imported.applications.find((application) => application.name === 'dokploy');
   assert.deepEqual(database.getApplication(dashboard.id)?.serviceProfile?.changeRules.map((rule) => rule.impact), ['hot-reload', 'manual-restart', 'confirmation-required']);
   database.close();
 });
 
+test('project import discards client-supplied profiles and re-detects the local Dokploy baseline', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-profile-boundary-test-'));
+  const database = await DockyardDatabase.open(new PathResolver(state));
+  const service = new ProjectService({ db: database }, {});
+  const preview = await scanProject(dokployFixture, false);
+  const imported = await service.import({ path: dokployFixture, name: 'client-name-is-not-profile-evidence', applications: preview.applications.map((application) => ({ ...application, serviceProfile: { profileId: 'forged', id: 'forged' } })) });
+  assert.equal(imported.applications.find((application) => application.name === 'dokploy')?.serviceProfile?.profileId, 'dokploy');
+  database.close();
+});
+
+test('a pre-path-profile SQLite record retains its service baseline but assesses paths conservatively after upgrade', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-profile-upgrade-test-'));
+  const resolver = new PathResolver(state);
+  const database = await DockyardDatabase.open(resolver);
+  const preview = await profiledDokployPreview();
+  const imported = database.importProject(preview.root, preview.projectName, preview.applications);
+  const dashboard = imported.applications.find((application) => application.name === 'dokploy');
+  database.close();
+  const raw = new DatabaseSync(resolver.databasePath());
+  const stored = raw.prepare('SELECT service_profile_json AS serviceProfileJson FROM applications WHERE id = ?').get(dashboard.id);
+  const legacy = JSON.parse(stored.serviceProfileJson);
+  delete legacy.processCommandHints;
+  legacy.changeRules = legacy.changeRules.map(({ pathPatterns, ...rule }) => rule);
+  raw.prepare('UPDATE applications SET service_profile_json = ? WHERE id = ?').run(JSON.stringify(legacy), dashboard.id);
+  raw.close();
+  const reopened = await DockyardDatabase.open(resolver);
+  const restored = reopened.getApplication(dashboard.id)?.serviceProfile;
+  assert.equal(restored?.defaultPort, 3000);
+  assert.deepEqual(restored?.processCommandHints, []);
+  assert.deepEqual(restored?.changeRules.map((rule) => rule.pathPatterns), [[], [], []]);
+  assert.deepEqual(assessServiceChanges(restored, dokployFixture, ['apps/dokploy/server/server.ts']).map((item) => item.impact), ['confirmation-required']);
+  assert.equal(parseServiceProfile(legacy)?.profileId, 'dokploy');
+  reopened.close();
+});
+
 test('changing a profiled service command clears its no-longer-accurate profile', async () => {
   const state = await mkdtemp(join(tmpdir(), 'dockyard-profile-command-test-'));
   const database = await DockyardDatabase.open(new PathResolver(state));
-  const preview = await scanProject(dokployFixture, false);
+  const preview = await profiledDokployPreview();
   const imported = database.importProject(preview.root, preview.projectName, preview.applications);
   const dashboard = imported.applications.find((application) => application.name === 'dokploy');
   const replacement = { ...dashboard, commandOptions: [...dashboard.commandOptions, { name: 'start', command: { executable: 'pnpm', args: ['run', 'start'] } }] };
@@ -200,14 +246,14 @@ test('display redaction covers command flags, JSON values, and authorization hea
   assert.deepEqual(redactDisplayValue({ command: { token: 'abc' }, authorization: 'Bearer xyz' }), { command: { token: '[REDACTED]' }, authorization: '[REDACTED]' });
 });
 
-test('external process discovery matches an imported application by cwd and prefers its listening process', () => {
+test('external process discovery requires command evidence, follows its process tree, and prefers the declared port', () => {
   const now = Date.UTC(2026, 7, 11, 12, 0, 0);
-  const processes = parseProcessTable(' 101 1 00:02:00 node /workspace/demo/node_modules/.bin/vite\n 102 101 01:02:03 node server.js\n 103 1 00:01:00 node /workspace/other/server.js', now).map((process) => process.pid === 101 || process.pid === 102 ? { ...process, cwd: '/workspace/demo' } : { ...process, cwd: '/workspace/other' });
-  const matches = matchingProcesses({ cwd: '/workspace/demo' }, processes);
-  const observed = selectObservedProcess(matches, new Map([[101, []], [102, [4318, 5173]]]));
+  const processes = parseProcessTable(' 101 1 00:02:00 node /workspace/demo/node_modules/.bin/pnpm.cjs run dev\n 102 101 01:02:03 node server.js\n 103 1 00:01:00 node /workspace/demo/node_modules/.bin/vite\n 104 1 00:01:00 node /workspace/other/server.js', now).map((process) => process.pid === 101 || process.pid === 102 || process.pid === 103 ? { ...process, cwd: '/workspace/demo' } : { ...process, cwd: '/workspace/other' });
+  const matches = matchingProcesses({ cwd: '/workspace/demo', command: { executable: 'pnpm', args: ['run', 'dev'] }, serviceProfile: undefined }, processes);
+  const observed = selectObservedProcess(matches, new Map([[101, []], [102, [4318, 5173]], [103, [3000]]]), 5173);
   assert.deepEqual(matches.map((process) => process.pid), [101, 102]);
   assert.deepEqual(observed, { pid: 102, startedAt: now - 3_723_000, listeningPorts: [4318, 5173] });
-  assert.equal(observed?.pid, 102, 'the actual listening child is the metric and PID target');
+  assert.equal(observed?.pid, 102, 'the actual declared-port listener in the matched process tree is the metric and PID target');
   assert.equal(sameProcessIdentity(102, now - 3_723_000, processes[1]), true);
   assert.equal(sameProcessIdentity(102, now - 3_700_000, processes[1]), false);
 });

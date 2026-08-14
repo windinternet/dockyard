@@ -1,13 +1,13 @@
 import { Injectable, NotFoundException, OnApplicationBootstrap, OnModuleDestroy, RequestTimeoutException } from '@nestjs/common';
 import { appendFileSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { mkdir, open, readdir, readlink, stat, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { platform } from 'node:os';
 import { promisify } from 'node:util';
-import { redactCommandForDisplay, redactDisplayText, redactDisplayValue, type Application, type ApplicationStatus, type LogCaptureStatus, type LogStream, type MetricRollup, type PortReachability, type Project, type ProjectSettings, type RuntimeOwnership, type ServiceHealthStatus, type ServiceProfile } from '@dockyard/core';
+import { assessServiceChanges, redactCommandForDisplay, redactDisplayText, redactDisplayValue, type Application, type ApplicationStatus, type ChangeAssessment, type LogCaptureStatus, type LogStream, type MetricRollup, type PortReachability, type Project, type ProjectSettings, type RuntimeOwnership, type ServiceHealthStatus, type ServiceProfile } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
 import { startInspectorLogCapture, type InspectorLogCapture } from './inspector-log-capture.js';
 
@@ -30,6 +30,7 @@ interface Runtime {
 
 export interface HostProcess { pid: number; ppid: number; startedAt: number; command: string; cwd?: string; }
 export interface ObservedProcess { pid: number; startedAt: number; listeningPorts: readonly number[]; }
+export interface UnknownExternalProcess { pid: number; ppid: number; startedAt: number; cwd: string; command: string; listeningPorts: readonly number[]; }
 interface ExternalLogCursor { path: string; position: number; }
 interface RestartRequest { application: Application; retries: number; }
 interface ProjectRuntime { child: ChildProcess; project: Project; status: ApplicationStatus; startedAt: number; retries: number; manuallyStopped: boolean; }
@@ -58,6 +59,7 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly stoppingProjects = new Set<string>();
   private readonly logs = new EventEmitter();
   private readonly updates = new EventEmitter();
+  private unknownExternalProcesses: UnknownExternalProcess[] = [];
   private metricRetentionDays = 7;
   private sampler: ReturnType<typeof setInterval>;
   private discovering = false;
@@ -80,6 +82,14 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
   projects(): Project[] { return this.database.db.listProjects().map((project) => this.withProjectRuntime(project)); }
   applications(): Application[] { return this.database.db.listApplications().map((application) => this.withStatus(application)); }
   application(id: string): Application { const application = this.database.db.getApplication(id); if (!application) throw new NotFoundException('应用不存在。'); return this.withStatus(application); }
+  unknownProcesses(): readonly UnknownExternalProcess[] { return this.unknownExternalProcesses; }
+  assessChanges(id: string, paths: readonly string[]): ChangeAssessment[] {
+    const application = this.application(id);
+    if (!application.serviceProfile) throw new RequestTimeoutException('该应用没有可评估的运行画像；请先确认启动命令或手动判断变更影响。');
+    const project = this.database.db.listProjects().find((item) => item.id === application.projectId);
+    if (!project) throw new NotFoundException('应用所属项目不存在。');
+    return assessServiceChanges(application.serviceProfile, project.path, paths);
+  }
   events(id: string) { this.application(id); return this.database.db.events(id).map((event) => ({ ...event, detail: redactDisplayValue(event.detail) as Record<string, unknown> })); }
   metrics(id: string, window: 'recent' | 'day' = 'recent') { this.application(id); const since = new Date(Date.now() - (window === 'day' ? 24 * 60 * 60 * 1_000 : this.metricRetentionDays * 86_400_000)).toISOString(); return this.database.db.metrics(id, since, window === 'recent' ? 60 : undefined); }
   async diagnostics(id: string): Promise<{ path: string }> { const application = this.application(id); const directory = this.database.db.pathResolver.diagnosticsDirectory(id); const path = `${directory}.json`; await mkdir(dirname(path), { recursive: true }); await writeFile(path, JSON.stringify({ generatedAt: new Date().toISOString(), application: { ...application, command: redactCommandForDisplay(application.command) }, events: this.events(id), metrics: this.metrics(id) }, null, 2), { encoding: 'utf8', flag: 'wx' }); this.database.db.recordEvent({ applicationId: id, type: 'diagnostics-exported', detail: { path } }); return { path }; }
@@ -358,11 +368,16 @@ export class RuntimeService implements OnApplicationBootstrap, OnModuleDestroy {
       if (!result.available) return;
       const applications = this.database.db.listApplications();
       const matches = new Map(applications.map((application) => [application.id, matchingProcesses(application, result.processes)]));
-      const pids = [...new Set([...matches.values()].flatMap((processes) => processes.map((process) => process.pid)))];
+      const projectPaths = this.database.db.listProjects().map((project) => project.path);
+      const pids = [...new Set([...matches.values()].flatMap((processes) => processes.map((process) => process.pid)).concat(result.processes.filter((process) => typeof process.cwd === 'string' && projectPaths.some((projectPath) => pathWithin(projectPath, process.cwd!))).map((process) => process.pid)))];
       const ports = await listeningPortsByPid(pids);
+      const knownPids = new Set([...matches.values()].flatMap((processes) => processes.map((process) => process.pid)));
+      this.unknownExternalProcesses = result.processes
+        .filter((process) => !knownPids.has(process.pid) && belongsToAnyProject(process, projectPaths))
+        .flatMap((process) => process.cwd === undefined ? [] : [{ ...process, cwd: process.cwd, listeningPorts: ports.get(process.pid) ?? [] }]);
       for (const application of applications) {
         const runtime = this.runtimes.get(application.id);
-        const observed = selectObservedProcess(matches.get(application.id) ?? [], ports);
+        const observed = selectObservedProcess(matches.get(application.id) ?? [], ports, application.serviceProfile?.defaultPort);
         if (runtime?.ownership === 'dockyard') {
           const nextPorts = observed?.listeningPorts ?? [];
           const nextPid = observed?.pid ?? runtime.child?.pid ?? runtime.pid;
@@ -453,17 +468,47 @@ export function parseProcessTable(output: string, now = Date.now()): HostProcess
   });
 }
 
-export function matchingProcesses(application: Pick<Application, 'cwd'>, processes: readonly HostProcess[]): HostProcess[] {
+/**
+ * A working directory alone is never sufficient evidence: terminal helpers often
+ * share it. We first find a process command that represents the selected service,
+ * then retain only that process tree so its listening child can be observed.
+ */
+export function matchingProcesses(application: Pick<Application, 'cwd' | 'command' | 'serviceProfile'>, processes: readonly HostProcess[]): HostProcess[] {
   const cwd = resolve(application.cwd);
-  return processes.filter((process) => process.cwd !== undefined && resolve(process.cwd) === cwd);
+  const inWorkingDirectory = processes.filter((process) => process.cwd !== undefined && resolve(process.cwd) === cwd);
+  const roots = new Set(inWorkingDirectory.filter((process) => processCommandMatches(application, process.command)).map((process) => process.pid));
+  if (!roots.size) return [];
+  const byPid = new Map(inWorkingDirectory.map((process) => [process.pid, process]));
+  return inWorkingDirectory.filter((process) => belongsToProcessTree(process, roots, byPid));
 }
 
-export function selectObservedProcess(processes: readonly HostProcess[], ports: ReadonlyMap<number, readonly number[]>): ObservedProcess | null {
+export function selectObservedProcess(processes: readonly HostProcess[], ports: ReadonlyMap<number, readonly number[]>, expectedPort?: number): ObservedProcess | null {
   if (!processes.length) return null;
-  const ordered = [...processes].sort((left, right) => (ports.get(right.pid)?.length ?? 0) - (ports.get(left.pid)?.length ?? 0) || left.startedAt - right.startedAt || left.pid - right.pid);
+  const ordered = [...processes].sort((left, right) => Number((ports.get(right.pid) ?? []).includes(expectedPort ?? -1)) - Number((ports.get(left.pid) ?? []).includes(expectedPort ?? -1)) || (ports.get(right.pid)?.length ?? 0) - (ports.get(left.pid)?.length ?? 0) || left.startedAt - right.startedAt || left.pid - right.pid);
   const listeningPorts = [...new Set(processes.flatMap((process) => ports.get(process.pid) ?? []))].sort((left, right) => left - right);
   return { pid: ordered[0]!.pid, startedAt: ordered[0]!.startedAt, listeningPorts };
 }
+
+function processCommandMatches(application: Pick<Application, 'command' | 'serviceProfile'>, command: string): boolean {
+  const normalized = command.toLocaleLowerCase();
+  const commandTokens = [application.command.executable, ...application.command.args].map((value) => value.toLocaleLowerCase());
+  const declaredCommand = commandTokens.every((token) => normalized.includes(token));
+  const hints = application.serviceProfile?.processCommandHints ?? [];
+  const runtimeHint = hints.length > 0 && hints.every((hint) => normalized.includes(hint.toLocaleLowerCase()));
+  return declaredCommand || runtimeHint;
+}
+function belongsToProcessTree(process: HostProcess, roots: ReadonlySet<number>, byPid: ReadonlyMap<number, HostProcess>): boolean {
+  const visited = new Set<number>();
+  let current: HostProcess | undefined = process;
+  while (current && !visited.has(current.pid)) {
+    if (roots.has(current.pid)) return true;
+    visited.add(current.pid);
+    current = byPid.get(current.ppid);
+  }
+  return false;
+}
+function pathWithin(root: string, path: string): boolean { const value = relative(resolve(root), resolve(path)); return value === '' || (!value.startsWith(`..${'/'}`) && !value.startsWith(`..${'\\'}`) && value !== '..' && !isAbsolute(value)); }
+function belongsToAnyProject(process: HostProcess, projectPaths: readonly string[]): boolean { const cwd = process.cwd; return cwd !== undefined && projectPaths.some((projectPath) => pathWithin(projectPath, cwd)); }
 
 /** Only regular local files are safe to tail after an independently-owned process has started. */
 export function externalLogFilesFromDescriptors(descriptors: Partial<Record<1 | 2, string>>): Partial<Record<LogStream, string>> {
