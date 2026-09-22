@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile } from 'node:fs/promises';
 import { closeSync, openSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -19,6 +19,14 @@ const fixture = resolve('tests/fixtures/scannable');
 const monorepoFixture = resolve('tests/fixtures/monorepo');
 const dokployFixture = resolve('tests/fixtures/dokploy');
 async function profiledDokployPreview() { return withCompatibilityProfile(await scanProject(dokployFixture, false), await detectDokployCompatibilityProfile(dokployFixture)); }
+async function waitForFileText(path, needle, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await readFile(path, 'utf8')).includes(needle)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`等待「${needle}」写入 ${path} 超时`);
+}
 
 test('runtime SSE emits named events so subscribed UI handlers receive metrics', () => {
   const event = runtimeEvent({ type: 'metric', metric: { applicationId: 'app-1', sampledAt: '2026-08-11T00:00:00.000Z', pid: 1, cpuPercent: 0, uptimeMs: 1, restartCount: 0, rssBytes: 1 } });
@@ -296,6 +304,8 @@ test('runtime follows file-backed logs from an externally started process', { sk
   const remove = runtime.onLog((message) => messages.push(message));
   try {
     await runtime.adoptExternalRuntime(application, undefined, { pid: child.pid, startedAt: Date.now(), listeningPorts: [] });
+    // 子进程从启动到写出第一行约需数十毫秒；先等它落盘再追加，外部文件里的行序和收集顺序才与断言一致。
+    await Promise.all([waitForFileText(stdoutPath, 'external-ready'), waitForFileText(stderrPath, 'external-warning')]);
     await appendFile(stdoutPath, 'external-next\n');
     await runtime.collectExternalLogs(runtime.runtimes.get(application.id));
     assert.deepEqual(messages.map((message) => [message.stream, message.line]).sort(), [['stderr', 'external-warning'], ['stdout', 'external-next'], ['stdout', 'external-ready']]);
