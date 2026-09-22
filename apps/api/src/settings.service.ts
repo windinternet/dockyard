@@ -14,14 +14,15 @@ export class SettingsService {
     const settings = this.database.db.applySettings(input);
     this.runtime.reloadRunningPolicies();
     this.runtime.setSampleInterval(settings.sampleIntervalMs);
+    this.runtime.setGracefulShutdownTimeout(settings.gracefulShutdownTimeoutMs);
     this.runtime.setMetricRetentionDays(settings.metricRetentionDays);
     return { ...settings, stateDirectory: this.get().stateDirectory };
   }
 }
 
 function parseSettings(value: unknown): SettingsInput {
-  if (!isRecord(value) || !isPositiveInteger(value.sampleIntervalMs) || value.sampleIntervalMs < 1_000 || value.sampleIntervalMs > 60_000 || !isPositiveInteger(value.logAutoScrollPauseMs) || value.logAutoScrollPauseMs < 1_000 || value.logAutoScrollPauseMs > 300_000 || !isPositiveInteger(value.metricRetentionDays) || value.metricRetentionDays > 31 || !isPositiveInteger(value.retentionDays) || !isPositiveInteger(value.maxFiles) || !isPositiveInteger(value.maxBytesPerFile) || !['balanced', 'resilient', 'manual'].includes(String(value.restartPreset))) throw new BadRequestException('设置值无效。采样间隔必须在 1 至 60 秒之间，日志自动滚动暂停必须在 1 至 300 秒之间，指标保留期必须在 1 至 31 天之间。');
-  return { sampleIntervalMs: value.sampleIntervalMs, logAutoScrollPauseMs: value.logAutoScrollPauseMs, metricRetentionDays: value.metricRetentionDays, retentionDays: value.retentionDays, maxFiles: value.maxFiles, maxBytesPerFile: value.maxBytesPerFile, restartPreset: value.restartPreset as RestartPreset };
+  if (!isRecord(value) || !isPositiveInteger(value.sampleIntervalMs) || value.sampleIntervalMs < 1_000 || value.sampleIntervalMs > 60_000 || !isPositiveInteger(value.gracefulShutdownTimeoutMs) || value.gracefulShutdownTimeoutMs < 1_000 || value.gracefulShutdownTimeoutMs > 60_000 || !isPositiveInteger(value.logAutoScrollPauseMs) || value.logAutoScrollPauseMs < 1_000 || value.logAutoScrollPauseMs > 300_000 || !isPositiveInteger(value.metricRetentionDays) || value.metricRetentionDays > 31 || !isPositiveInteger(value.retentionDays) || !isPositiveInteger(value.maxFiles) || !isPositiveInteger(value.maxBytesPerFile) || !['balanced', 'resilient', 'manual'].includes(String(value.restartPreset))) throw new BadRequestException('设置值无效。采样间隔和优雅退出等待时间必须在 1 至 60 秒之间，日志自动滚动暂停必须在 1 至 300 秒之间，指标保留期必须在 1 至 31 天之间。');
+  return { sampleIntervalMs: value.sampleIntervalMs, gracefulShutdownTimeoutMs: value.gracefulShutdownTimeoutMs, logAutoScrollPauseMs: value.logAutoScrollPauseMs, metricRetentionDays: value.metricRetentionDays, retentionDays: value.retentionDays, maxFiles: value.maxFiles, maxBytesPerFile: value.maxBytesPerFile, restartPreset: value.restartPreset as RestartPreset };
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null; }
 function isPositiveInteger(value: unknown): value is number { return typeof value === 'number' && Number.isInteger(value) && value > 0; }
