@@ -1,6 +1,6 @@
 # Dockyard 架构地图
 
-Dockyard 是面向 Node.js 开发服务的本机优先控制平面。一个长期运行的守护进程负责子进程、文件监听、策略判定、日志、运行指标采样和 Web 面板托管。Web 面板与 CLI 都不直接拥有进程，而是通过同一套类型化本机 API 请求和观察守护进程。
+Dockyard 是面向本机开发服务的本机优先控制平面。Node.js 是第一类运行器；Java、Shell 等按 [`docs/design-docs/runner-architecture.md`](docs/design-docs/runner-architecture.md) 的同一契约纳入。一个长期运行的守护进程负责子进程、文件监听、策略判定、日志、运行指标采样和 Web 面板托管。Web 面板与 CLI 都不直接拥有进程，而是通过同一套类型化本机 API 请求和观察守护进程。
 
 ```text
 apps/web（React + Semi 源码） ── Vite 中间件（开发）/静态资源（生产） ──┐
@@ -20,7 +20,7 @@ apps/cli（Commander） ──────────────────�
 | `apps/api` | 守护进程生命周期、REST/SSE 边界、Vite 中间件/生产静态资源托管、适配器 | UI 状态或 CLI 展示 |
 | `apps/web` | 人类工作流、国际化、主题、可视化；作为 API 应用托管的前端资源 | 进程创建或直接访问数据库 |
 | `packages/cli` | 面向 Agent 的命令和 stdout 契约 | 第二套进程管理器 |
-| `packages/core` | 领域类型、策略结构、事件契约 | Node/Nest/React 的具体实现 |
+| `packages/core` | 领域类型、运行器契约、策略结构、事件契约 | Node/Nest/React 的具体实现 |
 | `packages/db` | SQLite 模式、仓储、迁移 | 日志内容或进程句柄 |
 
 完整设计见 [`docs/design-docs/system-architecture.md`](docs/design-docs/system-architecture.md)。

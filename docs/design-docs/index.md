@@ -5,3 +5,4 @@
 | [核心理念](core-beliefs.md) | 已采纳 | 平台 | 产品与工程不变量 |
 | [系统架构](system-architecture.md) | 提议中 | 平台 | 运行时、数据与接口设计 |
 | [功能设计](functional-design.md) | 提议中 | 平台 | 模块、契约、数据与实施路线 |
+| [运行器架构](runner-architecture.md) | 提议中 | 平台 | 运行器类型、项目类型识别与多运行时边界 |
