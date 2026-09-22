@@ -1,6 +1,9 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
-import { relative, resolve } from 'node:path';
-import { parseApplicationCommand, parseCommandOptions, parseLogPolicy, parseProjectSettings, parseRestartPolicy, scanProject, scanProjectDirectory, withCompatibilityProfile, type ImportPreview, type ImportPreviewApplication, type ProjectSettings } from '@dockyard/core';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { constants } from 'node:fs';
+import { access } from 'node:fs/promises';
+import { delimiter, join, relative, resolve } from 'node:path';
+import { platform } from 'node:os';
+import { defaultRunnerKind, parseApplicationCommand, parseCommandLine, parseCommandOptions, parseLogPolicy, parseProjectSettings, parseRestartPolicy, parseRunnerKind, runnerSummaries, runners, scanProject, scanProjectDirectory, withCompatibilityProfile, type Application, type ImportPreview, type ImportPreviewApplication, type ProjectSettings } from '@dockyard/core';
 import { DatabaseService } from './database.service.js';
 import { detectDokployCompatibilityProfile } from './dokploy-compatibility-profile.js';
 import { RuntimeService } from './runtime.service.js';
@@ -26,6 +29,33 @@ export class ProjectService {
       return { root, projects: (await Promise.all(projects.map(async (project) => this.profile(project)))).map((project) => this.preview(project)) };
     } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法扫描项目目录。'); }
   }
+  /** Re-detects runner types for an already imported project so the panel can offer the fallback runner. */
+  async runnerCatalog(id: string) {
+    const project = this.database.db.listProjects().find((item) => item.id === id);
+    if (!project) throw new NotFoundException('项目不存在。');
+    return { path: project.path, runners: await runnerSummaries(project.path) };
+  }
+  /** Registers an explicit command under a runner that accepts user-defined applications. */
+  async addUserApplication(projectId: string, input: unknown) {
+    const project = this.database.db.listProjects().find((item) => item.id === projectId);
+    if (!project) throw new NotFoundException('项目不存在。');
+    const draft = await parseUserApplication(input, project.path);
+    try {
+      return this.database.db.createUserApplication(projectId, draft);
+    } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法创建应用。'); }
+  }
+  /** Re-points an existing user-defined application. Scanned applications keep their discovered commands. */
+  async updateUserApplication(applicationId: string, input: unknown) {
+    const application = this.runtime.application(applicationId);
+    if (!userDefinedRunnerKind(application.runnerKind)) throw new BadRequestException('只有手动登记的应用可以修改命令。');
+    if (application.status !== 'stopped' && application.status !== 'crashed') throw new BadRequestException('请先停止应用，再修改它的命令。');
+    const project = this.database.db.listProjects().find((item) => item.id === application.projectId);
+    if (!project) throw new NotFoundException('项目不存在。');
+    const draft = await parseUserApplication(input, project.path, application.runnerKind);
+    try {
+      return this.database.db.updateUserApplication(applicationId, draft);
+    } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : '无法更新应用。'); }
+  }
   async import(input: unknown) {
     const body = record(input);
     if (!body || typeof body.path !== 'string' || typeof body.name !== 'string' || !Array.isArray(body.applications)) throw new BadRequestException('导入请求无效。');
@@ -36,7 +66,7 @@ export class ProjectService {
     if (!projectEntrypointOptions || selectedProjectEntrypoint === undefined || (selectedProjectEntrypoint !== null && !projectEntrypointOptions.some((option) => option.name === selectedProjectEntrypoint))) throw new BadRequestException('项目级启动入口无效。');
     const root = resolve(body.path);
     if ((candidates as ImportPreviewApplication[]).some((candidate) => outside(root, candidate.cwd))) throw new BadRequestException('应用工作目录必须位于导入项目内。');
-    const trustedCandidates = withCompatibilityProfile({ root, projectName: body.name, projectEntrypointOptions, selectedProjectEntrypoint, applications: candidates as ImportPreviewApplication[], warnings: [] }, await detectDokployCompatibilityProfile(root)).applications;
+    const trustedCandidates = withCompatibilityProfile({ root, projectName: body.name, projectEntrypointOptions, selectedProjectEntrypoint, applications: candidates as ImportPreviewApplication[], runners: await runnerSummaries(root), warnings: [] }, await detectDokployCompatibilityProfile(root)).applications;
     const project = this.database.db.listProjects().find((item) => item.path === root);
     if (project) {
       const stale = staleApplicationsFor(this.database.db.listApplications(project.id), trustedCandidates);
@@ -72,17 +102,54 @@ export class ProjectService {
   private preview(preview: ImportPreview) {
     const project = this.database.db.listProjects().find((item) => item.path === preview.root);
     const staleApplications = project ? staleApplicationsFor(this.database.db.listApplications(project.id), preview.applications).map((application) => ({ id: application.id, name: application.name, cwd: application.cwd })) : [];
-    return { project: { path: preview.root, name: preview.projectName, entrypointOptions: preview.projectEntrypointOptions, selectedEntrypoint: preview.selectedProjectEntrypoint }, applications: preview.applications, compatibilityProfile: preview.compatibilityProfile, warnings: preview.warnings, staleApplications };
+    return { project: { path: preview.root, name: preview.projectName, entrypointOptions: preview.projectEntrypointOptions, selectedEntrypoint: preview.selectedProjectEntrypoint }, applications: preview.applications, runners: preview.runners, compatibilityProfile: preview.compatibilityProfile, warnings: preview.warnings, staleApplications };
   }
 }
+
+interface UserApplicationDraft { name: string; cwd: string; runnerKind: ImportPreviewApplication['runnerKind']; command: ImportPreviewApplication['command']; }
+
+/** Validates a user-defined application before it is persisted, including that its executable is reachable. */
+async function parseUserApplication(input: unknown, projectPath: string, runnerKindOverride?: ImportPreviewApplication['runnerKind']): Promise<UserApplicationDraft> {
+  const body = record(input);
+  if (!body) throw new BadRequestException('请求无效。');
+  if (typeof body.name !== 'string' || !body.name.trim() || body.name.trim().length > 120) throw new BadRequestException('应用名称必须是 1 到 120 个字符。');
+  // An update keeps the runner that already owns the application; the client cannot switch it by editing.
+  const runnerKind = runnerKindOverride ?? parseRunnerKind(body.runnerKind);
+  if (!runnerKind || !userDefinedRunnerKind(runnerKind)) throw new BadRequestException('该运行器类型不支持手动登记命令。');
+  if (typeof body.cwd !== 'string' || !body.cwd.trim()) throw new BadRequestException('工作目录不能为空。');
+  if (typeof body.commandLine !== 'string' || body.commandLine.length > 2_000) throw new BadRequestException('命令必须是 2000 字符以内的字符串。');
+  const parsed = parseCommandLine(body.commandLine);
+  if ('error' in parsed) throw new BadRequestException(parsed.error);
+  const cwd = resolve(projectPath, body.cwd.trim());
+  if (outside(projectPath, cwd)) throw new BadRequestException('工作目录必须位于项目内。');
+  await assertExecutableReachable(parsed.command.executable);
+  return { name: body.name.trim(), cwd, runnerKind, command: parsed.command };
+}
+
+/** The daemon spawns with its own PATH, so that is the PATH a registered command must resolve in. */
+async function assertExecutableReachable(executable: string): Promise<void> {
+  const mode = platform() === 'win32' ? constants.F_OK : constants.X_OK;
+  const candidates = executable.includes('/') || executable.includes('\\')
+    ? [resolve(executable)]
+    : (process.env.PATH ?? '').split(delimiter).filter(Boolean).map((directory) => join(directory, executable));
+  for (const candidate of candidates) {
+    try { await access(candidate, mode); return; } catch { /* try the next PATH entry */ }
+  }
+  throw new BadRequestException(`找不到可执行文件「${executable}」；请确认它在守护进程的 PATH 中，或填写绝对路径。`);
+}
+function userDefinedRunnerKind(kind: ImportPreviewApplication['runnerKind']): boolean { return runners.find((runner) => runner.kind === kind)?.userDefinedCommands === true; }
 function parseCandidate(value: unknown): ImportPreviewApplication | null {
   const body = record(value);
   if (!body || (body.origin !== 'package-script' && body.origin !== 'pm2-ecosystem') || typeof body.key !== 'string' || typeof body.name !== 'string' || typeof body.cwd !== 'string') return null;
   const command = parseApplicationCommand(body.command); const commandOptions = parseCommandOptions(body.commandOptions); const selectedCommand = typeof body.selectedCommand === 'string' ? body.selectedCommand : null; const restartPolicy = parseRestartPolicy(body.restartPolicy); const logPolicy = parseLogPolicy(body.logPolicy);
-  if (!command || !commandOptions || !selectedCommand || !commandOptions.some((option) => option.name === selectedCommand) || !restartPolicy || !logPolicy) return null;
-  return { key: body.key, origin: body.origin, name: body.name, cwd: body.cwd, command, commandOptions, selectedCommand, restartPolicy, logPolicy, warnings: [] };
+  const runnerKind = body.runnerKind === undefined ? defaultRunnerKind : parseRunnerKind(body.runnerKind);
+  if (!command || !commandOptions || !selectedCommand || !commandOptions.some((option) => option.name === selectedCommand) || !restartPolicy || !logPolicy || !runnerKind) return null;
+  // User-defined runners are never import candidates; they are registered explicitly by a person.
+  if (userDefinedRunnerKind(runnerKind)) return null;
+  return { key: body.key, origin: body.origin, runnerKind, name: body.name, cwd: body.cwd, command, commandOptions, selectedCommand, restartPolicy, logPolicy, warnings: [] };
 }
 function record(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function outside(root: string, candidate: string): boolean { const path = relative(root, resolve(candidate)); return path === '..' || path.startsWith(`..${'/'}`) || path.startsWith(`..${'\\'}`); }
 function directChild(root: string, candidate: string): boolean { const path = relative(root, resolve(candidate)); return Boolean(path) && !outside(root, candidate) && !path.includes('/') && !path.includes('\\'); }
-function staleApplicationsFor(existing: ReturnType<DatabaseService['db']['listApplications']>, candidates: readonly ImportPreviewApplication[]) { const desired = new Map<string, Set<string>>(); for (const candidate of candidates) { const names = desired.get(candidate.cwd) ?? new Set<string>(); names.add(candidate.name); desired.set(candidate.cwd, names); } return existing.filter((application) => !desired.get(application.cwd)?.has(application.name)); }
+/** Only discovered applications can become stale; a person's explicit command is never replaced by a scan. */
+function staleApplicationsFor(existing: readonly Application[], candidates: readonly ImportPreviewApplication[]): Application[] { const desired = new Map<string, Set<string>>(); for (const candidate of candidates) { const names = desired.get(candidate.cwd) ?? new Set<string>(); names.add(candidate.name); desired.set(candidate.cwd, names); } return existing.filter((application) => !userDefinedRunnerKind(application.runnerKind) && !desired.get(application.cwd)?.has(application.name)); }

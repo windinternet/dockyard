@@ -1,0 +1,953 @@
+{
+  "note": "Refactor baseline captured before the runner extraction. Regenerate only when scanner behavior intentionally changes.",
+  "projects": [
+    {
+      "fixture": "scannable",
+      "includePm2": true,
+      "preview": {
+        "root": "<root:fixtures>/scannable",
+        "projectName": "scannable",
+        "projectEntrypointOptions": [
+          {
+            "name": "dev",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            }
+          },
+          {
+            "name": "start",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "start"
+              ]
+            }
+          }
+        ],
+        "selectedProjectEntrypoint": "dev",
+        "applications": [
+          {
+            "key": "script:<root:fixtures>/scannable",
+            "origin": "package-script",
+            "name": "scannable-fixture",
+            "cwd": "<root:fixtures>/scannable",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              },
+              {
+                "name": "start",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "start"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          },
+          {
+            "key": "pm2:<root:fixtures>/scannable/ecosystem.json:0",
+            "origin": "pm2-ecosystem",
+            "name": "fixture-pm2",
+            "cwd": "<root:fixtures>/scannable",
+            "command": {
+              "executable": "<node>",
+              "args": [
+                "<root:fixtures>/scannable/server.mjs"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "pm2",
+                "command": {
+                  "executable": "<node>",
+                  "args": [
+                    "<root:fixtures>/scannable/server.mjs"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "pm2",
+            "restartPolicy": {
+              "mode": "never",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": [
+              {
+                "field": "instances",
+                "reason": "PM2 生产/集群字段不受 MVP 支持。"
+              }
+            ]
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "fixture": "scannable",
+      "includePm2": false,
+      "preview": {
+        "root": "<root:fixtures>/scannable",
+        "projectName": "scannable",
+        "projectEntrypointOptions": [
+          {
+            "name": "dev",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            }
+          },
+          {
+            "name": "start",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "start"
+              ]
+            }
+          }
+        ],
+        "selectedProjectEntrypoint": "dev",
+        "applications": [
+          {
+            "key": "script:<root:fixtures>/scannable",
+            "origin": "package-script",
+            "name": "scannable-fixture",
+            "cwd": "<root:fixtures>/scannable",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              },
+              {
+                "name": "start",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "start"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "fixture": "monorepo",
+      "includePm2": true,
+      "preview": {
+        "root": "<root:fixtures>/monorepo",
+        "projectName": "monorepo",
+        "projectEntrypointOptions": [
+          {
+            "name": "dev",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            }
+          }
+        ],
+        "selectedProjectEntrypoint": "dev",
+        "applications": [
+          {
+            "key": "script:<root:fixtures>/monorepo/apps/service",
+            "origin": "package-script",
+            "name": "service",
+            "cwd": "<root:fixtures>/monorepo/apps/service",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              },
+              {
+                "name": "start",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "start"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "fixture": "monorepo",
+      "includePm2": false,
+      "preview": {
+        "root": "<root:fixtures>/monorepo",
+        "projectName": "monorepo",
+        "projectEntrypointOptions": [
+          {
+            "name": "dev",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            }
+          }
+        ],
+        "selectedProjectEntrypoint": "dev",
+        "applications": [
+          {
+            "key": "script:<root:fixtures>/monorepo/apps/service",
+            "origin": "package-script",
+            "name": "service",
+            "cwd": "<root:fixtures>/monorepo/apps/service",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              },
+              {
+                "name": "start",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "start"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "fixture": "dokploy",
+      "includePm2": true,
+      "preview": {
+        "root": "<root:fixtures>/dokploy",
+        "projectName": "dokploy",
+        "projectEntrypointOptions": [
+          {
+            "name": "dokploy:dev",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dokploy:dev"
+              ]
+            }
+          }
+        ],
+        "selectedProjectEntrypoint": "dokploy:dev",
+        "applications": [
+          {
+            "key": "script:<root:fixtures>/dokploy/apps/api",
+            "origin": "package-script",
+            "name": "@dokploy/api",
+            "cwd": "<root:fixtures>/dokploy/apps/api",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          },
+          {
+            "key": "script:<root:fixtures>/dokploy/apps/dokploy",
+            "origin": "package-script",
+            "name": "dokploy",
+            "cwd": "<root:fixtures>/dokploy/apps/dokploy",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          },
+          {
+            "key": "script:<root:fixtures>/dokploy/apps/schedules",
+            "origin": "package-script",
+            "name": "@dokploy/schedules",
+            "cwd": "<root:fixtures>/dokploy/apps/schedules",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "fixture": "dokploy",
+      "includePm2": false,
+      "preview": {
+        "root": "<root:fixtures>/dokploy",
+        "projectName": "dokploy",
+        "projectEntrypointOptions": [
+          {
+            "name": "dokploy:dev",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dokploy:dev"
+              ]
+            }
+          }
+        ],
+        "selectedProjectEntrypoint": "dokploy:dev",
+        "applications": [
+          {
+            "key": "script:<root:fixtures>/dokploy/apps/api",
+            "origin": "package-script",
+            "name": "@dokploy/api",
+            "cwd": "<root:fixtures>/dokploy/apps/api",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          },
+          {
+            "key": "script:<root:fixtures>/dokploy/apps/dokploy",
+            "origin": "package-script",
+            "name": "dokploy",
+            "cwd": "<root:fixtures>/dokploy/apps/dokploy",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          },
+          {
+            "key": "script:<root:fixtures>/dokploy/apps/schedules",
+            "origin": "package-script",
+            "name": "@dokploy/schedules",
+            "cwd": "<root:fixtures>/dokploy/apps/schedules",
+            "command": {
+              "executable": "pnpm",
+              "args": [
+                "run",
+                "dev"
+              ]
+            },
+            "commandOptions": [
+              {
+                "name": "dev",
+                "command": {
+                  "executable": "pnpm",
+                  "args": [
+                    "run",
+                    "dev"
+                  ]
+                }
+              }
+            ],
+            "selectedCommand": "dev",
+            "restartPolicy": {
+              "mode": "on-failure",
+              "maxRetries": 5,
+              "retryDelayMs": 1000,
+              "stableWindowMs": 30000
+            },
+            "logPolicy": {
+              "maxFiles": 5,
+              "maxBytesPerFile": 10485760,
+              "retentionDays": 14
+            },
+            "warnings": []
+          }
+        ],
+        "warnings": []
+      }
+    }
+  ],
+  "directory": [
+    {
+      "root": "<root:fixtures>/dokploy",
+      "projectName": "dokploy",
+      "projectEntrypointOptions": [
+        {
+          "name": "dokploy:dev",
+          "command": {
+            "executable": "pnpm",
+            "args": [
+              "run",
+              "dokploy:dev"
+            ]
+          }
+        }
+      ],
+      "selectedProjectEntrypoint": "dokploy:dev",
+      "applications": [
+        {
+          "key": "script:<root:fixtures>/dokploy/apps/api",
+          "origin": "package-script",
+          "name": "@dokploy/api",
+          "cwd": "<root:fixtures>/dokploy/apps/api",
+          "command": {
+            "executable": "pnpm",
+            "args": [
+              "run",
+              "dev"
+            ]
+          },
+          "commandOptions": [
+            {
+              "name": "dev",
+              "command": {
+                "executable": "pnpm",
+                "args": [
+                  "run",
+                  "dev"
+                ]
+              }
+            }
+          ],
+          "selectedCommand": "dev",
+          "restartPolicy": {
+            "mode": "on-failure",
+            "maxRetries": 5,
+            "retryDelayMs": 1000,
+            "stableWindowMs": 30000
+          },
+          "logPolicy": {
+            "maxFiles": 5,
+            "maxBytesPerFile": 10485760,
+            "retentionDays": 14
+          },
+          "warnings": []
+        },
+        {
+          "key": "script:<root:fixtures>/dokploy/apps/dokploy",
+          "origin": "package-script",
+          "name": "dokploy",
+          "cwd": "<root:fixtures>/dokploy/apps/dokploy",
+          "command": {
+            "executable": "pnpm",
+            "args": [
+              "run",
+              "dev"
+            ]
+          },
+          "commandOptions": [
+            {
+              "name": "dev",
+              "command": {
+                "executable": "pnpm",
+                "args": [
+                  "run",
+                  "dev"
+                ]
+              }
+            }
+          ],
+          "selectedCommand": "dev",
+          "restartPolicy": {
+            "mode": "on-failure",
+            "maxRetries": 5,
+            "retryDelayMs": 1000,
+            "stableWindowMs": 30000
+          },
+          "logPolicy": {
+            "maxFiles": 5,
+            "maxBytesPerFile": 10485760,
+            "retentionDays": 14
+          },
+          "warnings": []
+        },
+        {
+          "key": "script:<root:fixtures>/dokploy/apps/schedules",
+          "origin": "package-script",
+          "name": "@dokploy/schedules",
+          "cwd": "<root:fixtures>/dokploy/apps/schedules",
+          "command": {
+            "executable": "pnpm",
+            "args": [
+              "run",
+              "dev"
+            ]
+          },
+          "commandOptions": [
+            {
+              "name": "dev",
+              "command": {
+                "executable": "pnpm",
+                "args": [
+                  "run",
+                  "dev"
+                ]
+              }
+            }
+          ],
+          "selectedCommand": "dev",
+          "restartPolicy": {
+            "mode": "on-failure",
+            "maxRetries": 5,
+            "retryDelayMs": 1000,
+            "stableWindowMs": 30000
+          },
+          "logPolicy": {
+            "maxFiles": 5,
+            "maxBytesPerFile": 10485760,
+            "retentionDays": 14
+          },
+          "warnings": []
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "root": "<root:fixtures>/monorepo",
+      "projectName": "monorepo",
+      "projectEntrypointOptions": [
+        {
+          "name": "dev",
+          "command": {
+            "executable": "pnpm",
+            "args": [
+              "run",
+              "dev"
+            ]
+          }
+        }
+      ],
+      "selectedProjectEntrypoint": "dev",
+      "applications": [
+        {
+          "key": "script:<root:fixtures>/monorepo/apps/service",
+          "origin": "package-script",
+          "name": "service",
+          "cwd": "<root:fixtures>/monorepo/apps/service",
+          "command": {
+            "executable": "pnpm",
+            "args": [
+              "run",
+              "dev"
+            ]
+          },
+          "commandOptions": [
+            {
+              "name": "dev",
+              "command": {
+                "executable": "pnpm",
+                "args": [
+                  "run",
+                  "dev"
+                ]
+              }
+            },
+            {
+              "name": "start",
+              "command": {
+                "executable": "pnpm",
+                "args": [
+                  "run",
+                  "start"
+                ]
+              }
+            }
+          ],
+          "selectedCommand": "dev",
+          "restartPolicy": {
+            "mode": "on-failure",
+            "maxRetries": 5,
+            "retryDelayMs": 1000,
+            "stableWindowMs": 30000
+          },
+          "logPolicy": {
+            "maxFiles": 5,
+            "maxBytesPerFile": 10485760,
+            "retentionDays": 14
+          },
+          "warnings": []
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "root": "<root:fixtures>/scannable",
+      "projectName": "scannable",
+      "projectEntrypointOptions": [
+        {
+          "name": "dev",
+          "command": {
+            "executable": "pnpm",
+            "args": [
+              "run",
+              "dev"
+            ]
+          }
+        },
+        {
+          "name": "start",
+          "command": {
+            "executable": "pnpm",
+            "args": [
+              "run",
+              "start"
+            ]
+          }
+        }
+      ],
+      "selectedProjectEntrypoint": "dev",
+      "applications": [
+        {
+          "key": "script:<root:fixtures>/scannable",
+          "origin": "package-script",
+          "name": "scannable-fixture",
+          "cwd": "<root:fixtures>/scannable",
+          "command": {
+            "executable": "pnpm",
+            "args": [
+              "run",
+              "dev"
+            ]
+          },
+          "commandOptions": [
+            {
+              "name": "dev",
+              "command": {
+                "executable": "pnpm",
+                "args": [
+                  "run",
+                  "dev"
+                ]
+              }
+            },
+            {
+              "name": "start",
+              "command": {
+                "executable": "pnpm",
+                "args": [
+                  "run",
+                  "start"
+                ]
+              }
+            }
+          ],
+          "selectedCommand": "dev",
+          "restartPolicy": {
+            "mode": "on-failure",
+            "maxRetries": 5,
+            "retryDelayMs": 1000,
+            "stableWindowMs": 30000
+          },
+          "logPolicy": {
+            "maxFiles": 5,
+            "maxBytesPerFile": 10485760,
+            "retentionDays": 14
+          },
+          "warnings": []
+        },
+        {
+          "key": "pm2:<root:fixtures>/scannable/ecosystem.json:0",
+          "origin": "pm2-ecosystem",
+          "name": "fixture-pm2",
+          "cwd": "<root:fixtures>/scannable",
+          "command": {
+            "executable": "<node>",
+            "args": [
+              "<root:fixtures>/scannable/server.mjs"
+            ]
+          },
+          "commandOptions": [
+            {
+              "name": "pm2",
+              "command": {
+                "executable": "<node>",
+                "args": [
+                  "<root:fixtures>/scannable/server.mjs"
+                ]
+              }
+            }
+          ],
+          "selectedCommand": "pm2",
+          "restartPolicy": {
+            "mode": "never",
+            "maxRetries": 5,
+            "retryDelayMs": 1000,
+            "stableWindowMs": 30000
+          },
+          "logPolicy": {
+            "maxFiles": 5,
+            "maxBytesPerFile": 10485760,
+            "retentionDays": 14
+          },
+          "warnings": [
+            {
+              "field": "instances",
+              "reason": "PM2 生产/集群字段不受 MVP 支持。"
+            }
+          ]
+        }
+      ],
+      "warnings": []
+    }
+  ]
+}

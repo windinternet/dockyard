@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp, readFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { closeSync, openSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import test from 'node:test';
-import { assessServiceChanges, parseServiceProfile, redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanProject, withCompatibilityProfile } from '../packages/core/dist/index.js';
+import { assessServiceChanges, parseCommandLine, parseServiceProfile, redactCommandForDisplay, redactDisplayText, redactDisplayValue, scanProject, scanProjectDirectory, withCompatibilityProfile } from '../packages/core/dist/index.js';
 import { DockyardDatabase, PathResolver } from '../packages/db/dist/index.js';
 import { normalizeSelection } from '../apps/api/dist/native-directory-picker.service.js';
 import { ProjectService } from '../apps/api/dist/project.service.js';
@@ -357,5 +357,111 @@ test('database upgrades the legacy local schema while preserving project and app
   const app = database.getApplication('app-1');
   assert.deepEqual(app?.command, { executable: 'pnpm', args: ['run', 'dev'] });
   assert.equal(database.listProjects()[0]?.name, 'Legacy');
+  assert.equal(app?.runnerKind, 'node');
   database.close();
+});
+
+test('scanning stays identical to the pre-runner baseline while reporting runner types', async () => {
+  const baseline = JSON.parse(await readFile('tests/fixtures/scan-baseline.json', 'utf8'));
+  const roots = [resolve('tests/fixtures'), ...['scannable', 'monorepo', 'dokploy'].map((name) => resolve('tests/fixtures', name))];
+  const scrub = (value) => { let text = JSON.stringify(value, null, 2).replaceAll(process.execPath, '<node>'); for (const root of roots) text = text.replaceAll(root, `<root:${root.split('/').at(-1)}>`); return JSON.parse(text); };
+  // The runner extraction adds runnerKind to each candidate and runners to the preview; nothing else may change.
+  const strip = ({ runners: _runners, ...preview }) => ({ ...preview, applications: preview.applications.map(({ runnerKind: _runnerKind, ...application }) => application) });
+  for (const entry of baseline.projects) {
+    assert.deepEqual(strip(scrub(await scanProject(resolve('tests/fixtures', entry.fixture), entry.includePm2))), entry.preview, `${entry.fixture} includePm2=${entry.includePm2}`);
+  }
+  assert.deepEqual(scrub(await scanProjectDirectory(resolve('tests/fixtures'), true)).map(strip), baseline.directory);
+});
+
+test('runner detection reports per-type evidence and keeps shell as the general fallback', async () => {
+  const preview = await scanProject(resolve('tests/fixtures/scannable'));
+  const node = preview.runners.find((runner) => runner.kind === 'node');
+  const shell = preview.runners.find((runner) => runner.kind === 'shell');
+  assert.deepEqual(node?.detection, { kind: 'node', label: 'Node.js', evidence: 'source-inspected', reasons: ['package.json', 'ecosystem.json'], candidatesAvailable: true });
+  assert.equal(preview.runners.find((runner) => runner.kind === 'java')?.detection, undefined);
+  assert.deepEqual(shell, { kind: 'shell', label: 'Shell 命令', alwaysAvailable: true, userDefinedCommands: true });
+  assert.equal(preview.applications.every((application) => application.runnerKind === 'node'), true);
+
+  const javaRoot = await mkdtemp(join(tmpdir(), 'dockyard-java-project-'));
+  await writeFile(join(javaRoot, 'pom.xml'), '<project/>');
+  const javaPreview = await scanProject(javaRoot, false);
+  assert.deepEqual(javaPreview.runners.find((runner) => runner.kind === 'java')?.detection?.reasons, ['pom.xml']);
+  assert.equal(javaPreview.runners.find((runner) => runner.kind === 'java')?.detection?.candidatesAvailable, false);
+  assert.equal(javaPreview.applications.length, 0);
+});
+
+test('explicit commands are parsed for direct execution and reject shell syntax', () => {
+  assert.deepEqual(parseCommandLine('php -S 127.0.0.1:8000 -t public'), { command: { executable: 'php', args: ['-S', '127.0.0.1:8000', '-t', 'public'] } });
+  assert.deepEqual(parseCommandLine('java -jar "target/my app.jar"'), { command: { executable: 'java', args: ['-jar', 'target/my app.jar'] } });
+  // Quoted text stays literal, so punctuation inside quotes remains an argument instead of shell syntax.
+  assert.deepEqual(parseCommandLine('php -r "echo 1;"'), { command: { executable: 'php', args: ['-r', 'echo 1;'] } });
+  assert.deepEqual(parseCommandLine('grep -e "a|b" file.log'), { command: { executable: 'grep', args: ['-e', 'a|b', 'file.log'] } });
+  assert.deepEqual(parseCommandLine('a \\$b'), { command: { executable: 'a', args: ['$b'] } });
+  assert.match(parseCommandLine('a && b').error, /shell 语法/u);
+  assert.match(parseCommandLine('a | b').error, /shell 语法/u);
+  assert.match(parseCommandLine('a > b').error, /shell 语法/u);
+  assert.match(parseCommandLine('FOO=$HOME cmd').error, /变量展开/u);
+  assert.match(parseCommandLine('echo "cost: $5"').error, /变量展开/u);
+  assert.match(parseCommandLine('   ').error, /不能为空/u);
+  assert.match(parseCommandLine("cmd 'unclosed").error, /引号/u);
+});
+
+test('a hand-registered command application persists under the shell runner and never becomes stale', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-user-application-'));
+  const database = await DockyardDatabase.open(new PathResolver(state));
+  const preview = await scanProject(fixture, false);
+  const imported = database.importProject(preview.root, preview.projectName, preview.applications);
+  assert.equal(database.getApplication(imported.applications[0].id)?.runnerKind, 'node');
+  const service = new ProjectService({ db: database }, new RuntimeService({ db: database }));
+
+  const created = await service.addUserApplication(imported.project.id, { runnerKind: 'shell', name: 'php-api', cwd: imported.project.path, commandLine: `"${process.execPath}" -v` });
+  assert.equal(created.runnerKind, 'shell');
+  assert.deepEqual(created.command, { executable: process.execPath, args: ['-v'] });
+  assert.equal(created.selectedCommand, basename(process.execPath));
+  assert.deepEqual(created.restartPolicy, imported.project.settings.restartPolicy);
+  assert.deepEqual(created.logPolicy, imported.project.settings.logPolicy);
+
+  // A re-scan may only replace discovered applications: the hand-registered command must not be reported as stale.
+  const rescanned = await service.scan({ path: imported.project.path, includePm2: false });
+  assert.deepEqual(rescanned.staleApplications, []);
+
+  const renamed = await service.updateUserApplication(created.id, { name: 'php-api-2', cwd: imported.project.path, commandLine: `"${process.execPath}" --version` });
+  assert.equal(renamed.name, 'php-api-2');
+  assert.deepEqual(renamed.command.args, ['--version']);
+  assert.equal(renamed.runnerKind, 'shell');
+  await assert.rejects(async () => await service.addUserApplication(imported.project.id, { runnerKind: 'shell', name: 'php-api-2', cwd: imported.project.path, commandLine: `"${process.execPath}" -v` }), /同名应用/u);
+  database.close();
+});
+
+test('registering a command application rejects shell syntax, unreachable executables, and foreign directories', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-user-application-reject-'));
+  const database = await DockyardDatabase.open(new PathResolver(state));
+  const preview = await scanProject(fixture, false);
+  const imported = database.importProject(preview.root, preview.projectName, preview.applications);
+  const service = new ProjectService({ db: database }, new RuntimeService({ db: database }));
+  const base = { runnerKind: 'shell', name: 'cmd', cwd: imported.project.path, commandLine: `"${process.execPath}" -v` };
+
+  await assert.rejects(async () => await service.addUserApplication(imported.project.id, { ...base, commandLine: 'php -S 0.0.0.0:8000 | tee log' }), /shell 语法/u);
+  await assert.rejects(async () => await service.addUserApplication(imported.project.id, { ...base, commandLine: 'definitely-not-installed-xyz --serve' }), /找不到可执行文件/u);
+  await assert.rejects(async () => await service.addUserApplication(imported.project.id, { ...base, cwd: tmpdir() }), /必须位于项目内/u);
+  await assert.rejects(async () => await service.addUserApplication(imported.project.id, { ...base, runnerKind: 'node' }), /不支持手动登记/u);
+  await assert.rejects(async () => await service.updateUserApplication(imported.applications[0].id, { name: 'renamed', cwd: imported.project.path, commandLine: `"${process.execPath}" -v` }), /只有手动登记/u);
+  database.close();
+});
+
+test('existing applications gain the node runner when the runner_kind column is migrated in', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'dockyard-runner-migration-'));
+  const database = await DockyardDatabase.open(new PathResolver(state));
+  const preview = await scanProject(fixture, false);
+  const imported = database.importProject(preview.root, preview.projectName, preview.applications);
+  const applicationId = imported.applications[0].id;
+  database.close();
+
+  const raw = new DatabaseSync(join(state, 'dockyard.sqlite'));
+  raw.exec('ALTER TABLE applications DROP COLUMN runner_kind;');
+  raw.close();
+
+  const reopened = await DockyardDatabase.open(new PathResolver(state));
+  assert.equal(reopened.getApplication(applicationId)?.runnerKind, 'node');
+  reopened.close();
 });

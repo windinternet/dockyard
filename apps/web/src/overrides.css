@@ -77,6 +77,19 @@ body {
   color: var(--semi-color-text-2);
 }
 
+/* Detected runner types for one project; the fallback runner is named only when nothing was detected. */
+.runner-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.runner-badges .semi-typography {
+  font-size: 12px;
+}
+
 .project-module-table {
   border-top: 1px solid var(--semi-color-border);
 }

@@ -45,6 +45,19 @@
 - api：Shell 应用创建与更新校验；启动后的实际 `command` / `cwd` 与登记值一致。
 - 回归：既有 23 项测试全部保持通过。
 
+## 切片 1 交付记录（已完成）
+
+- `packages/core`：领域契约拆到 `domain.ts`；`runners.ts` 提供 `Runner` 契约、三个运行器（node / java / shell）、`detectRunners`、`runnerSummaries`、`isProjectDirectory` 与 `parseCommandLine`；`scanProject` 变成运行器编排。
+- **行为不变有基线保证**：重构前把 `scanProject` / `scanProjectDirectory` 在三个 fixture 上的输出冻结为 `tests/fixtures/scan-baseline.json`，重构后逐字段比对（仅新增的 `runnerKind` 与 `runners` 被剥离），6 次项目扫描与目录扫描全部一致。
+- Java 本切片只做**类型识别**（`pom.xml` / `build.gradle(.kts)` / `settings.gradle(.kts)`），`candidatesAvailable: false`；命令推导属切片 2。
+- `parseCommandLine` 不接受 shell 语法。引号内文本是字面量，因此 `php -r "echo 1;"`、`grep -e "a|b"` 合法；未加引号的管道、重定向、命令串联，以及双引号内的变量展开会被拒绝并给出可读原因。
+- `applications.runner_kind` 通过 `ensureColumn` 迁移，旧行得到 `node`；`Application.runnerKind` 是唯一新增的持久化字段。
+- 用户定义的应用走 `POST /api/projects/:id/applications` 与 `PATCH /api/applications/:id/user-command`，**不进入导入候选**：`staleApplicationsFor` 因此不会把人工登记的记录当作过时记录要求替换。
+- 校验包含可执行文件可达性（用守护进程自己的 PATH 解析，与启动时一致）。更新时运行器类型由已存记录决定，客户端不能通过编辑切换运行器。
+- 命令编辑界面**故意不回填**当前命令：接口返回的是脱敏后的显示值，回填并保存会把脱敏值写进数据库。
+
+**已知缺口**：CLI 尚无登记命令应用的子命令；`listeningPorts` 仍只由宿主进程表（`ps`）驱动，守护进程无法读取进程表时，即使应用由 Dockyard 自己启动也不会显示监听端口——这两项不影响本切片的验收，留给后续切片。
+
 ## 验证命令
 
 ```bash

@@ -75,9 +75,10 @@ Dockyard 的生命周期内核本来就是与语言无关的：`ApplicationComma
 | `ApplicationCommand`、生命周期、日志、指标、端口、健康探测 | 不动，已经通用 |
 | `ServiceProfile` | 保留为声明式运行时描述；由运行器生成或校验 |
 | `scanProject()` 的 package.json 逻辑 | 搬入 node 运行器，行为不变 |
-| `nodeRelatedCommand` | 换成按运行器聚合的进程指纹集合 |
-| `ImportPreviewApplication.origin` | 扩展出"运行器检测"与"用户定义"两类来源 |
+| `nodeRelatedCommand` | 换成按运行器聚合的进程指纹集合（切片 3） |
+| `ImportPreviewApplication` | 新增 `runnerKind`；用户定义的应用走独立端点，不进入导入候选，因此 `origin` 暂不扩展 |
 | `applications` 表 | 新增 `runner_kind` 列，旧行默认 `node` |
+| `Application.runnerKind` | 运行器的持久化标识；`shell` 即"用户手动登记命令"的应用，扫描永远不会替换它 |
 
 ## 首批范围
 

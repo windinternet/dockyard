@@ -1,10 +1,11 @@
 import { BadRequestException, Body, Controller, Get, Header, Param, Patch, Post, Query, Sse } from '@nestjs/common';
 import { parseLogPolicy, parseRestartPolicy, redactCommandForDisplay, redactDisplayText, type Application } from '@dockyard/core';
 import { Observable } from 'rxjs';
+import { ProjectService } from './project.service.js';
 import { RuntimeService, type LogMessage, type RuntimeUpdate } from './runtime.service.js';
 @Controller('api/applications')
 export class ApplicationsController {
-  constructor(private readonly runtime: RuntimeService) {}
+  constructor(private readonly runtime: RuntimeService, private readonly projects: ProjectService) {}
   @Get() list() { return { applications: this.runtime.applications().map(publicApplication) }; }
   @Get('discovered') unknownProcesses() { return { processes: this.runtime.unknownProcesses().map((process) => ({ ...process, command: redactDisplayText(process.command) })) }; }
   @Sse('stream') stream(): Observable<MessageEvent> { return new Observable((subscriber) => this.runtime.onUpdate((update) => subscriber.next(runtimeEvent(update)))); }
@@ -30,6 +31,7 @@ export class ApplicationsController {
   }
   @Patch(':id/policies') policies(@Param('id') id: string, @Body() body: unknown) { const value = record(body); const restartPolicy = parseRestartPolicy(value?.restartPolicy); const logPolicy = parseLogPolicy(value?.logPolicy); if (!restartPolicy || !logPolicy) throw new BadRequestException('重启或日志策略无效。'); return publicApplication(this.runtime.updatePolicies(id, restartPolicy, logPolicy)); }
   @Patch(':id/command') command(@Param('id') id: string, @Body() body: unknown) { const value = record(body); if (!value || typeof value.selectedCommand !== 'string') throw new BadRequestException('启动命令无效。'); return publicApplication(this.runtime.updateCommand(id, value.selectedCommand)); }
+  @Patch(':id/user-command') async userCommand(@Param('id') id: string, @Body() body: unknown) { return publicApplication(await this.projects.updateUserApplication(id, body)); }
   @Post(':id/diagnostics') diagnostics(@Param('id') id: string) { return this.runtime.diagnostics(id); }
   @Sse(':id/logs/tail') tail(@Param('id') id: string, @Query('stream') stream = 'combined'): Observable<MessageEvent> {
     this.runtime.application(id);
